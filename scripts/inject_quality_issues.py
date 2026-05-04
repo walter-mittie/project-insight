@@ -484,10 +484,10 @@ def verify_injection(
 # ==============================================================================
 
 def main() -> None:
-    print("\n╔══════════════════════════════════════════════════════════════════╗")
-    print("║  inject_quality_issues.py — AM1 Sprint 1 / F-02                        ║")
-    print("║  Reads  : data/raw/        Writes : data/processed/             ║")
-    print("╚══════════════════════════════════════════════════════════════════╝\n")
+    print("\n══════════════════════════════════════════════════════════════════")
+    print("inject_quality_issues.py — AM1 Sprint 1 / F-02")
+    print("Reads  : data/raw/        Writes : data/processed/")
+    print("════════════════════════════════════════════════════════════════════\n")
 
     # ── 1. Load raw Parquet files ─────────────────────────────────────────────
     print("Loading raw Parquet files from data/raw/ ...")
@@ -561,10 +561,10 @@ def main() -> None:
         dirty_market=fact_market_dirty,
     )
 
-    print("╔══════════════════════════════════════════════════════════════════╗")
-    print("║  inject_quality_issues.py — COMPLETE                                   ║")
-    print("║  data/processed/ ready for preprocess.py (F-03)                ║")
-    print("╚══════════════════════════════════════════════════════════════════╝\n")
+    print("════════════════════════════════════════════════════════════════════\n")
+    print("inject_quality_issues.py — COMPLETED")
+    print("data/processed/ ready for preprocess.py (F-03)")
+    print("════════════════════════════════════════════════════════════════════\n")
 
 
 if __name__ == "__main__":
