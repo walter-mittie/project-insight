@@ -903,7 +903,11 @@ def generate_fact_sales(dim_product: pd.DataFrame,
     df["baseline_volume"]   = baseline_vol
     df["incremental_volume"] = incremental_vol
 
-    # ── 11. Realised selling price ────────────────────────────────────────────
+    # ── 11. Manufacturer net realised price per unit (sku_net_price_gbp) ────────
+    # Net price = list price × realisation fraction after trade discount.
+    # Non-promo: 95–102% of list (minor contractual variation).
+    # Promo:     75–90% of list (reflects promo investment depth).
+    # trade_discount_gbp = volume × (list_price − sku_net_price_gbp)
     lo = np.where(
         is_promo,
         PRICE_REALISATION_RANGE["promo"][0],
@@ -916,13 +920,13 @@ def generate_fact_sales(dim_product: pd.DataFrame,
     )
     realisation          = np.random.random(n_rows) * (hi - lo) + lo
     list_prices          = df["list_price_gbp"].values
-    selling_price        = np.round(list_prices * realisation, 2)
-    df["selling_price_gbp"] = selling_price
+    sku_net_price        = np.round(list_prices * realisation, 2)
+    df["sku_net_price_gbp"] = sku_net_price
 
     # ── 12. Revenue columns ───────────────────────────────────────────────────
     df["gross_revenue_gbp"]  = np.round(volume * list_prices, 2)
     df["trade_discount_gbp"] = np.round(
-        volume * np.maximum(0.0, list_prices - selling_price), 2
+        volume * np.maximum(0.0, list_prices - sku_net_price), 2
     )
     df["net_revenue_gbp"]    = np.round(
         df["gross_revenue_gbp"].values - df["trade_discount_gbp"].values, 2
@@ -937,7 +941,7 @@ def generate_fact_sales(dim_product: pd.DataFrame,
         "week_date", "year", "quarter", "month", "week_number",
         "product_id", "customer_id",
         "volume_units", "gross_revenue_gbp", "trade_discount_gbp",
-        "net_revenue_gbp", "selling_price_gbp",
+        "net_revenue_gbp", "sku_net_price_gbp",
         "is_promoted", "promotion_mechanic",
         "baseline_volume", "incremental_volume",
     ]
@@ -975,8 +979,10 @@ def generate_fact_market(dim_product: pd.DataFrame,
         the critical constraint brand_vol ≤ category_vol for all raw rows.
     4.  Apply ValuMart 2025 deterioration by reducing brand_share for
         ValuMart rows linearly across 2025 ISO weeks (1.00 → 0.82).
-    5.  Derive manufacturer_net_price_gbp then apply channel-appropriate
-        RETAILER_MARKUP to produce consumer_shelf_price_gbp (RSP). Value columns use RSP — consistent with how Nielsen/Kantar measure value sales at the till.
+    5.  Derive avg_shelf_price_gbp — brand mean list price × channel RETAILER_MARKUP
+        × weekly noise (±10%). Represents consumer-facing RSP, consistent with how
+        Nielsen/Kantar measure value sales at the till. manufacturer_net_price_gbp
+        is NOT stored here — it belongs in fact_sales.sku_net_price_gbp.
     6.  Derive distribution columns.
     7.  FK + constraint assertions before return.
 
@@ -1056,13 +1062,13 @@ def generate_fact_market(dim_product: pd.DataFrame,
     grid["brand_volume_units"]          = brand_vol
     grid["total_category_volume_units"] = total_cat_vol
 
-    # ── 8. Average selling price per brand + consumer shelf price ────────────
-    # manufacturer_net_price_gbp: manufacturer's net realised price (trade net).
-    #   Derived from brand mean list price ± week-to-week noise (±10%).
-    # consumer_shelf_price_gbp: retailer shelf price (RSP).
-    #   = manufacturer_net_price_gbp × channel markup.
-    #   This is the price Nielsen/Kantar record when measuring value sales —
-    #   so value columns below use RSP, not the manufacturer net price.
+    # ── 8. Average shelf price (avg_shelf_price_gbp) ─────────────────────────
+    # Represents the consumer-facing retail shelf price (RSP) — the price
+    # Nielsen/Kantar record when measuring value sales at the till.
+    # Derived from brand mean list price × channel markup × weekly noise (±10%).
+    # This is a brand-level weekly average, not an individual SKU price.
+    # Retailer margin is not stored here — it is derivable at query time by
+    # joining to fact_sales.sku_net_price_gbp (manufacturer net) via brand+banner.
     brand_avg_price = (
         dim_product.groupby("brand")["list_price_gbp"]
         .mean()
@@ -1074,9 +1080,6 @@ def generate_fact_market(dim_product: pd.DataFrame,
     price_noise = np.random.uniform(
         MARKET_PRICE_NOISE_RANGE[0], MARKET_PRICE_NOISE_RANGE[1], size=n_rows
     )
-    grid["manufacturer_net_price_gbp"] = np.round(
-        grid["_brand_base_price"].values * price_noise, 2
-    )
 
     # Banner → channel lookup to apply the right markup per row
     banner_channel = (
@@ -1087,20 +1090,20 @@ def generate_fact_market(dim_product: pd.DataFrame,
     grid["_channel"] = grid["banner"].map(banner_channel)
     markup = grid["_channel"].map(RETAILER_MARKUP).values.astype(float)
 
-    grid["consumer_shelf_price_gbp"] = np.round(
-        grid["manufacturer_net_price_gbp"] * markup, 2
+    grid["avg_shelf_price_gbp"] = np.round(
+        grid["_brand_base_price"].values * price_noise * markup, 2
     )
 
     # ── 9. Value columns (at RSP — consistent with panel measurement) ─────────
-    # Nielsen/Kantar value = volume × consumer shelf price, not manufacturer net.
+    # Nielsen/Kantar value = volume × consumer shelf price.
     grid["brand_value_gbp"] = np.round(
-        grid["brand_volume_units"] * grid["consumer_shelf_price_gbp"], 2
+        grid["brand_volume_units"] * grid["avg_shelf_price_gbp"], 2
     )
 
     cat_price_mult = np.random.uniform(0.92, 1.08, size=n_rows)
     grid["total_category_value_gbp"] = np.round(
         grid["total_category_volume_units"]
-        * grid["consumer_shelf_price_gbp"]
+        * grid["avg_shelf_price_gbp"]
         * cat_price_mult, 2
     )
 
@@ -1139,7 +1142,7 @@ def generate_fact_market(dim_product: pd.DataFrame,
         "brand_volume_units", "brand_value_gbp",
         "total_category_volume_units", "total_category_value_gbp",
         "numeric_distribution_outlets", "total_outlets_in_banner",
-        "manufacturer_net_price_gbp", "consumer_shelf_price_gbp",
+        "avg_shelf_price_gbp",
     ]
     grid = grid[col_order].reset_index(drop=True)
 
@@ -1155,8 +1158,8 @@ def generate_fact_market(dim_product: pd.DataFrame,
         "fact_market FK violation: sub_category not in dim_product"
     assert (grid["brand_volume_units"] <= grid["total_category_volume_units"]).all(), \
         "fact_market CONSTRAINT violation: brand_volume_units > total_category_volume_units"
-    assert (grid["consumer_shelf_price_gbp"] > grid["manufacturer_net_price_gbp"]).all(), \
-        "fact_market CONSTRAINT violation: consumer_shelf_price_gbp ≤ manufacturer_net_price_gbp"
+    assert (grid["avg_shelf_price_gbp"] > 0).all(), \
+        "fact_market CONSTRAINT violation: avg_shelf_price_gbp must be positive"
 
     return grid
 
@@ -1482,32 +1485,22 @@ def validate_fact_market():
     print(f"\nbrand_vol ≤ category_vol : "
           f"{'PASS ✓' if violations == 0 else f'FAIL — {violations} violations'}")
 
-    # Shelf price > manufacturer net (retailer margin check)
-    margin_violations = (
-        df["consumer_shelf_price_gbp"] <= df["manufacturer_net_price_gbp"]
-    ).sum()
-    print(f"shelf_price > mfr_net    : "
-          f"{'PASS ✓' if margin_violations == 0 else f'FAIL — {margin_violations} violations'}")
+    # avg_shelf_price_gbp must be positive
+    price_violations = (df["avg_shelf_price_gbp"] <= 0).sum()
+    print(f"avg_shelf_price > 0      : "
+          f"{'PASS ✓' if price_violations == 0 else f'FAIL — {price_violations} violations'}")
 
-    # Implied retailer margin by banner
-    df["_implied_margin"] = (
-        (df["consumer_shelf_price_gbp"] - df["manufacturer_net_price_gbp"])
-        / df["consumer_shelf_price_gbp"]
+    # avg_shelf_price sanity: should be above brand mean list price (markup applied)
+    brand_list = (
+        pd.read_parquet(os.path.join(RAW_DIR, "dim_product.parquet"))
+        .groupby("brand")["list_price_gbp"].mean()
+        .reset_index()
+        .rename(columns={"list_price_gbp": "mean_list_price"})
     )
-    print(f"\nImplied retailer margin by banner (sample):")
-    margin_by_banner = (
-        df.merge(
-            pd.read_parquet(os.path.join(RAW_DIR, "dim_customer.parquet"))
-            [["banner", "channel"]].drop_duplicates("banner"),
-            on="banner", how="left"
-        )
-        .groupby("channel")["_implied_margin"]
-        .mean()
-        .mul(100)
-        .round(1)
-    )
-    print(margin_by_banner.to_string())
-    print(f"  → Expect Convenience highest (~28%), Discounter lowest (~17%)")
+    check = df.merge(brand_list, on="brand", how="left")
+    below_list = (check["avg_shelf_price_gbp"] < check["mean_list_price"]).mean()
+    print(f"avg_shelf_price above list price: {(1-below_list):.1%} of rows  "
+          f"(expect >80% — markup applied)")
 
     # Distribution outlets ≤ total outlets
     dist_violations = (

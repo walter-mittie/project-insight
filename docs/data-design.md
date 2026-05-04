@@ -457,7 +457,7 @@ regions = ["North", "Midlands", "South", "Scotland", "Wales"]
 | gross_revenue_gbp | FLOAT | Revenue before trade investment |
 | trade_discount_gbp | FLOAT | Promotional + contractual discounts |
 | net_revenue_gbp | FLOAT | gross - discount |
-| selling_price_gbp | FLOAT | Manufacturer's net realised price per unit (trade net — not consumer shelf price) |
+| sku_net_price_gbp | FLOAT | Manufacturer's net realised price per unit (post-discount). trade_discount per unit = list_price_gbp − sku_net_price_gbp. Source: fact_sales only — not visible to panel providers |
 | is_promoted | BOOLEAN | Promotion flag |
 | promotion_mechanic | VARCHAR | Price Reduction, BOGOF, Multi-buy, NULL |
 | baseline_volume | INTEGER | Structural demand — lognormal base with performance signals applied. Zero promo contribution by definition |
@@ -543,7 +543,7 @@ The two seasonal signals are counter-cyclical by design — Porridge & Oats dips
 
 ### Quality issues (inject_quality.py)
 
-- ~3% of `selling_price_gbp` set to zero (system recording errors on promoted lines)
+- ~3% of `sku_net_price_gbp` set to zero (system recording errors on promoted lines)
 - ~2% of `volume_units` as outliers — 5–10× baseline (data entry / duplicates)
 - `promotion_mechanic` NULL for ~30% of rows where `is_promoted = True`
 
@@ -570,8 +570,7 @@ The two seasonal signals are counter-cyclical by design — Porridge & Oats dips
 | total_category_value_gbp | FLOAT | Total market value (all brands) |
 | numeric_distribution_outlets | INTEGER | Outlets stocking the brand |
 | total_outlets_in_banner | INTEGER | Total outlets (distribution denominator) |
-| manufacturer_net_price_gbp | FLOAT | Manufacturer's average net realised price (trade net). Derived from brand mean list price ± 10% noise. Enables implied retailer margin calculation at query time |
-| consumer_shelf_price_gbp | FLOAT | Retailer shelf price (RSP) = manufacturer_net × channel markup. This is the price Nielsen/Kantar record when measuring value sales. Constraint: always > manufacturer_net_price_gbp |
+| avg_shelf_price_gbp | FLOAT | Brand-level weekly average consumer shelf price (RSP). Derived as brand mean list price × channel RETAILER_MARKUP × weekly noise (±10%). This is the price Nielsen/Kantar record at the till — not an SKU-level price and not the manufacturer's net price |
 
 ### CRITICAL generation constraint
 
@@ -579,12 +578,13 @@ Generate `total_category_volume_units` FIRST as market size.
 Derive `brand_volume_units` as a share of that.
 **Never the reverse** — brand volume must always be ≤ category volume.
 
-### Retailer markup (manufacturer net → consumer shelf price)
+### Retailer markup (list price → avg_shelf_price_gbp)
 
 ```python
 # Applied per row via banner → channel lookup.
-# Value columns use consumer_shelf_price_gbp — consistent with Nielsen/Kantar
-# which measure value at the till, not at manufacturer invoice.
+# avg_shelf_price_gbp = brand_mean_list_price × RETAILER_MARKUP × noise(0.90, 1.10)
+# Value columns use avg_shelf_price_gbp — consistent with Nielsen/Kantar which
+# measure value at the till, not at manufacturer invoice.
 RETAILER_MARKUP = {
     "Grocery":     1.30,   # standard grocery margin ~23% on RSP
     "Discounter":  1.20,   # EDLP model — lower branded margin (~17%)
@@ -594,9 +594,12 @@ RETAILER_MARKUP = {
 }
 ```
 
-Implied retailer margin is derivable at query time:
+`manufacturer_net_price_gbp` is NOT stored in `fact_market` — panel providers have no
+visibility of bilateral trade terms. The manufacturer's net price lives in
+`fact_sales.sku_net_price_gbp`. Implied retailer margin is derivable by joining both tables:
+
 ```sql
-(consumer_shelf_price_gbp - manufacturer_net_price_gbp) / consumer_shelf_price_gbp
+(fm.avg_shelf_price_gbp - AVG(fs.sku_net_price_gbp)) / fm.avg_shelf_price_gbp
 ```
 
 ### Derived measures (computed in preprocess.py, NOT stored raw)
@@ -606,7 +609,7 @@ Implied retailer margin is derivable at query time:
 df["market_share_volume_pct"]   = df.brand_volume_units / df.total_category_volume_units * 100
 df["market_share_value_pct"]    = df.brand_value_gbp / df.total_category_value_gbp * 100
 df["numeric_distribution_pct"]  = df.numeric_distribution_outlets / df.total_outlets_in_banner * 100
-df["price_index"]               = (df.consumer_shelf_price_gbp /
+df["price_index"]               = (df.avg_shelf_price_gbp /
                                    (df.total_category_value_gbp / df.total_category_volume_units) * 100)
 # weighted_distribution_pct requires store_count join from dim_customer
 ```
@@ -633,11 +636,29 @@ JOIN (
 
 -- WRONG: direct join without aggregation is INVALID
 -- fact_market has no FK to fact_sales customer_id
+
+-- Implied retailer margin (requires cross-table join — richer NL2SQL query)
+SELECT
+    fm.brand, fm.banner, fm.week_date,
+    fm.avg_shelf_price_gbp,
+    agg.avg_net_price,
+    (fm.avg_shelf_price_gbp - agg.avg_net_price) / fm.avg_shelf_price_gbp AS implied_margin
+FROM fact_market fm
+JOIN (
+    SELECT dp.brand, dc.banner, fs.week_date,
+           AVG(fs.sku_net_price_gbp) AS avg_net_price
+    FROM fact_sales fs
+    JOIN dim_product  dp ON fs.product_id  = dp.product_id
+    JOIN dim_customer dc ON fs.customer_id = dc.customer_id
+    GROUP BY dp.brand, dc.banner, fs.week_date
+) agg ON fm.brand     = agg.brand
+     AND fm.banner    = agg.banner
+     AND fm.week_date = agg.week_date
 ```
 
 ### Quality issues (inject_quality.py)
 
-- ~5% of `manufacturer_net_price_gbp` set to zero (system recording failures)
+- ~5% of `avg_shelf_price_gbp` set to zero (system recording failures)
 - ~1% of rows where `brand_volume_units` > `total_category_volume_units` (deliberately violating the pre-injection generation constraint — tests that preprocess.py detects and flags these)
 - 3–4 week temporal gaps for select banner × brand combinations (left sparse in processed layer — not interpolated)
 
@@ -660,8 +681,9 @@ JOIN (
 | Two seasonal signals (Porridge & Oats Q3, Ice Cream Q4) — counter-cyclical by design | Different seasonal shapes enable richer NL2SQL queries: *"compare seasonal patterns across sub-categories"* or *"which categories are counter-cyclical?"* return genuinely contrasting results | Single seasonal signal — rejected: limits analytical surface of the prototype |
 | `CHANNEL_CATEGORY_UNLISTED` final set: Frozen/Convenience, Frozen/eCommerce, Snacks/eCommerce | Frozen/Convenience: no freezer logistics in small-format. Frozen/eCommerce: consumer last-mile not viable. Snacks/eCommerce: low value density, uneconomic. Foodservice retains all three (commercial kitchens). Dairy eCommerce retained (Ocado/FreshDoor model) | Earlier set also excluded Dairy/eCommerce and Confectionery/Foodservice — reversed after real-world rationale review |
 | `how="cross"` for all cross-joins; `_k` dummy column pattern removed | Native pandas cross-join is explicit, readable, and does not mutate source DataFrames. `_k` pattern required defensive `.copy()` calls and left junk columns | `_k` merge pattern — replaced as code quality improvement |
-| `consumer_shelf_price_gbp` added to `fact_market` via channel-keyed `RETAILER_MARKUP` | Nielsen/Kantar value sales are measured at RSP. Value columns must use RSP to be analytically coherent with real market data conventions | Single markup — rejected: channel differences in retailer margin are meaningful and analytically surfaceable |
-| `manufacturer_net_price_gbp` retained alongside `consumer_shelf_price_gbp` | Enables implied retailer margin to be derived at query time without any joins. Real analytical question: *"which banners generate the highest margin on our brands?"* | Remove manufacturer net — rejected: loses margin derivability from the table |
+| `selling_price_gbp` renamed to `sku_net_price_gbp` in `fact_sales` | Unambiguous industry term — "net price" means post-discount manufacturer realised price in all FMCG commercial finance contexts. `selling_price` is ambiguous between shelf price and invoice price | `sku_sales_price` — rejected: ambiguous; could refer to consumer or manufacturer side |
+| `avg_shelf_price_gbp` in `fact_market` — single price column (no `manufacturer_net_price_gbp`) | Panel providers have no visibility of bilateral trade terms. `manufacturer_net_price_gbp` in `fact_market` implied Nielsen knows manufacturer-retailer trade terms — factually wrong. RSP is the only price Nielsen/Kantar can measure. Retailer margin is derivable via cross-table join to `fact_sales.sku_net_price_gbp` | Storing both prices in `fact_market` — rejected: manufacturer net does not belong in panel measurement data |
+| `avg_shelf_price_gbp` naming (not `consumer_shelf_price_gbp`) | Explicitly communicates it is a brand-level weekly average, not an individual SKU or individual consumer price. Prevents misinterpretation as a transactional price | `consumer_shelf_price_gbp` — rejected: implies per-consumer or per-SKU granularity |
 | `snap_to_realistic_price()` NOT applied to `selling_price_gbp` or `fact_market` price columns | `selling_price_gbp` is manufacturer trade net — calculated as % discount off list, lands at arbitrary pence. Pence snapping applies only to consumer-facing list prices in `dim_product` | Apply pence endings to selling price — rejected: wrong data layer, wrong semantics; also prohibitively slow on 2M rows via scalar function |
 | Retailer margin not modelled in `fact_sales` | Requires off-invoice rates and bill-back accruals — neither is modelled. Any computation would produce manufacturer discount, not retailer margin | Add retailer margin to `fact_sales` — deferred: requires separate trade terms table, out of scope |
 | Faker (en_GB) for string fields | Realistic UK-sounding names improve demo readability; seeded for reproducibility | Generic IDs only — rejected: reduces demo authenticity |
@@ -704,8 +726,8 @@ df = pd.read_parquet('data/raw/fact_market.parquet')
 print(df.shape)                                      # expect ~44K rows
 # Pre-injection constraint: brand_volume ≤ category_volume
 assert (df.brand_volume_units <= df.total_category_volume_units).all()
-# Price relationship: shelf price always above manufacturer net
-assert (df.consumer_shelf_price_gbp > df.manufacturer_net_price_gbp).all()
+# Shelf price positive and above brand mean list (markup applied)
+assert (df.avg_shelf_price_gbp > 0).all()
 ```
 
 ---
