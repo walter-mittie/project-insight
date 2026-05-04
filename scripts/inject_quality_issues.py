@@ -4,7 +4,7 @@ inject_quality_issues.py
 AM1 Sprint 1 / F-02 — Deliberate Data Quality Injection
 
 Reads clean Parquet files from data/raw/ and writes quality-issue-injected
-versions to data/processed/. Raw files are never modified.
+versions to data/raw/qi-injected/. Raw files are never modified.
 
 Quality issues injected (all deliberate by design — documented and version-
 controlled so that EDA decisions in preprocess.py are evidentially grounded):
@@ -49,10 +49,10 @@ Execution
 
 Output
 ------
-    data/processed/dim_product.parquet   (552 rows — casing corrupted)
-    data/processed/dim_customer.parquet  (240 rows — unchanged copy)
-    data/processed/fact_sales.parquet    (~2.3M rows — 3 issues injected)
-    data/processed/fact_market.parquet   (~44K rows less gap drops — 3 issues)
+    data/raw/qi-injected/dim_product.parquet   (552 rows — casing corrupted)
+    data/raw/qi-injected/dim_customer.parquet  (240 rows — unchanged copy)
+    data/raw/qi-injected/fact_sales.parquet    (~2.3M rows — 3 issues injected)
+    data/raw/qi-injected/fact_market.parquet   (~44K rows less gap drops — 3 issues)
 """
 
 import os
@@ -76,11 +76,10 @@ random.seed(INJECT_SEED)
 # Assumes this script sits in scripts/ alongside generate_data.py.
 # data/ is a sibling directory of scripts/ at the project root.
 # ──────────────────────────────────────────────────────────────────────────────
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-RAW_DIR = os.path.join(BASE_DIR, "..", "data", "raw")
-PROCESSED_DIR = os.path.join(BASE_DIR, "..", "data", "processed")
-os.makedirs(PROCESSED_DIR, exist_ok=True)
-
+BASE_DIR  = os.path.dirname(os.path.abspath(__file__))
+RAW_DIR   = os.path.join(BASE_DIR, "..", "data", "raw")
+DIRTY_DIR = os.path.join(BASE_DIR, "..", "data", "raw", "qi-injected")
+os.makedirs(DIRTY_DIR, exist_ok=True)
 # ──────────────────────────────────────────────────────────────────────────────
 # INJECTION RATES
 # Named constants for transparency and defensibility — every rate here
@@ -525,7 +524,7 @@ def verify_injection(
 def main() -> None:
     print("\n══════════════════════════════════════════════════════════════════")
     print("inject_quality_issues.py — AM1 Sprint 1 / F-02")
-    print("Reads  : data/raw/        Writes : data/processed/")
+    print("Reads  : data/raw/        Writes : data/raw/qi-injected/")
     print("════════════════════════════════════════════════════════════════════\n")
 
     # ── 1. Load raw Parquet files ─────────────────────────────────────────────
@@ -587,26 +586,26 @@ def main() -> None:
     )
     fact_market_dirty = inject_fact_market(fact_market)
 
-    # ── 3. Write to data/processed/ ──────────────────────────────────────────
-    print("\n── Writing dirty Parquet files to data/processed/ ───────────────────")
+    # ── 3. Write to data/raw/qi-injected/ ──────────────────────────────────────────
+    print("\n── Writing dirty Parquet files to data/raw/qi-injected/ ───────────────────")
 
     dim_product_dirty.to_parquet(
-        os.path.join(PROCESSED_DIR, "dim_product.parquet"), index=False
+        os.path.join(DIRTY_DIR, "dim_product.parquet"), index=False
     )
     print(f"  ✓  dim_product.parquet    {len(dim_product_dirty):>7,} rows")
 
     dim_customer_dirty.to_parquet(
-        os.path.join(PROCESSED_DIR, "dim_customer.parquet"), index=False
+        os.path.join(DIRTY_DIR, "dim_customer.parquet"), index=False
     )
     print(f"  ✓  dim_customer.parquet   {len(dim_customer_dirty):>7,} rows")
 
     fact_sales_dirty.to_parquet(
-        os.path.join(PROCESSED_DIR, "fact_sales.parquet"), index=False
+        os.path.join(DIRTY_DIR, "fact_sales.parquet"), index=False
     )
     print(f"  ✓  fact_sales.parquet     {len(fact_sales_dirty):>7,} rows")
 
     fact_market_dirty.to_parquet(
-        os.path.join(PROCESSED_DIR, "fact_market.parquet"), index=False
+        os.path.join(DIRTY_DIR, "fact_market.parquet"), index=False
     )
     print(f"  ✓  fact_market.parquet    {len(fact_market_dirty):>7,} rows")
 
@@ -622,7 +621,7 @@ def main() -> None:
 
     print("════════════════════════════════════════════════════════════════════\n")
     print("inject_quality_issues.py — COMPLETED")
-    print("data/processed/ ready for preprocess.py (F-03)")
+    print("data/raw/qi-injected/ ready for preprocess.py (F-03)")
     print("════════════════════════════════════════════════════════════════════\n")
 
 
