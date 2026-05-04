@@ -20,7 +20,7 @@ Sprint 1 reference document — last updated: 3 May 2026
 
 ```
 scripts/generate_data.py    → data/raw/         (raw, with deliberate quality issues)
-scripts/inject_quality.py   → data/raw/         (applies quality issues to raw files)
+scripts/inject_quality_issues.py   → data/raw/         (applies quality issues to raw files)
 scripts/preprocess.py       → data/processed/   (clean, validated, derived measures computed)
 ```
 
@@ -500,7 +500,7 @@ Key rationale: Foodservice retains Frozen (commercial kitchens use frozen goods)
 
 ### Intentional performance signals
 
-Built into `baseline_volume` generation — **NOT injected by inject_quality.py, and NOT applied to total volume**. Signals are applied to baseline before the promotion draw, so structural trends are isolated from promo mix variation.
+Built into `baseline_volume` generation — **NOT injected by inject_quality_issues.py, and NOT applied to total volume**. Signals are applied to baseline before the promotion draw, so structural trends are isolated from promo mix variation.
 
 Generation order:
 ```
@@ -541,11 +541,11 @@ The two seasonal signals are counter-cyclical by design — Porridge & Oats dips
 
 **Verification:** Performance signals are confirmed via `baseline_volume` summary queries only. Checking `volume_units` would conflate structural trend with promo uplift variation.
 
-### Quality issues (inject_quality.py)
+### Quality issues (inject_quality_issues.py)
 
 - ~3% of `sku_net_price_gbp` set to zero (system recording errors on promoted lines)
 - ~2% of `volume_units` as outliers — 5–10× baseline (data entry / duplicates)
-- `promotion_mechanic` NULL for ~30% of rows where `is_promoted = True`
+- `promotion_mechanic` NULL for ~22% of rows where `is_promoted = True`
 
 ---
 
@@ -656,7 +656,7 @@ JOIN (
      AND fm.week_date = agg.week_date
 ```
 
-### Quality issues (inject_quality.py)
+### Quality issues (inject_quality_issues.py)
 
 - ~5% of `avg_shelf_price_gbp` set to zero (system recording failures)
 - ~1% of rows where `brand_volume_units` > `total_category_volume_units` (deliberately violating the pre-injection generation constraint — tests that preprocess.py detects and flags these)
@@ -684,7 +684,7 @@ JOIN (
 | `selling_price_gbp` renamed to `sku_net_price_gbp` in `fact_sales` | Unambiguous industry term — "net price" means post-discount manufacturer realised price in all FMCG commercial finance contexts. `selling_price` is ambiguous between shelf price and invoice price | `sku_sales_price` — rejected: ambiguous; could refer to consumer or manufacturer side |
 | `avg_shelf_price_gbp` in `fact_market` — single price column (no `manufacturer_net_price_gbp`) | Panel providers have no visibility of bilateral trade terms. `manufacturer_net_price_gbp` in `fact_market` implied Nielsen knows manufacturer-retailer trade terms — factually wrong. RSP is the only price Nielsen/Kantar can measure. Retailer margin is derivable via cross-table join to `fact_sales.sku_net_price_gbp` | Storing both prices in `fact_market` — rejected: manufacturer net does not belong in panel measurement data |
 | `avg_shelf_price_gbp` naming (not `consumer_shelf_price_gbp`) | Explicitly communicates it is a brand-level weekly average, not an individual SKU or individual consumer price. Prevents misinterpretation as a transactional price | `consumer_shelf_price_gbp` — rejected: implies per-consumer or per-SKU granularity |
-| `snap_to_realistic_price()` NOT applied to `selling_price_gbp` or `fact_market` price columns | `selling_price_gbp` is manufacturer trade net — calculated as % discount off list, lands at arbitrary pence. Pence snapping applies only to consumer-facing list prices in `dim_product` | Apply pence endings to selling price — rejected: wrong data layer, wrong semantics; also prohibitively slow on 2M rows via scalar function |
+| `snap_to_realistic_price()` NOT applied to `sku_net_price_gbp` or `fact_market` price columns | `sku_net_price_gbp` is manufacturer trade net — calculated as % discount off list, lands at arbitrary pence. Pence snapping applies only to consumer-facing list prices in `dim_product` | Apply pence endings to selling price — rejected: wrong data layer, wrong semantics; also prohibitively slow on 2M rows via scalar function |
 | Retailer margin not modelled in `fact_sales` | Requires off-invoice rates and bill-back accruals — neither is modelled. Any computation would produce manufacturer discount, not retailer margin | Add retailer margin to `fact_sales` — deferred: requires separate trade terms table, out of scope |
 | Faker (en_GB) for string fields | Realistic UK-sounding names improve demo readability; seeded for reproducibility | Generic IDs only — rejected: reduces demo authenticity |
 | Variant-based SKU differentiation (12 per brand-subcat) | FMCG SKU proliferation comes from variants, not pack size combinations | Pack size proliferation — rejected: produces unrealistic range depth |
