@@ -1,7 +1,7 @@
 # Project Insight — Data Design Document
 **AM1: Agentic Conversational BI — LLM-Driven Ad-Hoc Data Exploration**  
 Candidate: Manu Mohandas | TCS | BCS Level 7 AI Data Specialist  
-Sprint 1 reference document — last updated: 3 May 2026
+Sprint 1 reference document — last updated: 5 May 2026
 
 ---
 
@@ -21,16 +21,18 @@ Sprint 1 reference document — last updated: 3 May 2026
 ```
 scripts/generate_data.py         →  data/raw/               (clean generated — never modified)
 scripts/inject_quality_issues.py →  data/raw/qi-injected/   (QI-injected — EDA viz reads here)
-scripts/preprocess.py            →  data/processed/          (clean, flagged, derived measures)
-scripts/eda_viz.py               →  data/eda-plots/          (EDA plots — reads qi-injected)
+scripts/preprocess.py            →  data/processed/         (clean, flagged, derived measures)
+                                 →  data/eda_report.md      (EDA profiling + handling decisions)                        
+scripts/eda_viz.py               →  data/eda_plots/         (EDA plots — reads qi-injected)
 ```
 
 - `data/raw/` — immutable. Generated once by `generate_data.py`, never overwritten. The clean baseline.
 - `data/raw/qi-injected/` — quality-issue-injected layer. Derived from raw, never modified after injection.
   `eda_viz.py` reads from here so visualisations always reflect the dirty state regardless of pipeline order.
-- `data/processed/` — the operational analytics layer. DuckDB queries only this layer.
-  Produced by `preprocess.py` from `qi-injected/`. Application has no knowledge of upstream layers.
-- `data/eda-plots/` — PNG outputs from `eda_viz.py`. Cited in the AM1 project report.
+- `data/processed/` — the operational analytics layer. DuckDB queries only this layer. Produced by preprocess.py 
+    from qi-injected/. Also produces data/eda_report.md — EDA findings and all QI handling decisions. 
+    Application has no knowledge of upstream layers.
+- `data/eda_plots/` — PNG outputs from `eda_viz.py`. Cited in the AM1 project report.
 
 ### Generation order (strict — respect FK dependencies)
 
