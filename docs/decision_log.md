@@ -1,6 +1,6 @@
 # Decision Log — Project Insight: Agentic Conversational BI
 **AM1 | BCS Level 7 AI Data Specialist | Manu Mohandas | TCS**
-Last updated: 2026-05-04
+Last updated: 2026-05-05
 
 ---
 
@@ -10,7 +10,7 @@ Each entry follows a fixed structure:
 - **Context** — what situation prompted the decision
 - **Decision** — what was chosen
 - **Rationale** — why, including the analytical or technical reasoning
-- **Alternatives considered**ADR-023 — what was rejected and why
+- **Alternatives considered** — what was rejected and why
 - **KSB mapping** — which KSBs this decision evidences
 - **Implementation** — where in the codebase the decision lives
 - **EDA / report evidence** — plots or report sections that cite this decision
@@ -410,34 +410,56 @@ schema dictionary so the LLM can be grounded on which combinations are affected.
 
 **Context**
 QI-04 injects volume outliers at 5–10× baseline into ~2% of fact_sales rows.
-Decision: which IQR multiplier to use for the Tukey fence in `preprocess.py`?
+Decision: which signal to apply the IQR fence to, and which multiplier to use?
 
 **Decision**
-Use Tukey outer fence: `upper_fence = Q3 + 3.0 × IQR` on the deviation metric
-`(volume_units − baseline_volume − incremental_volume)`.
+Two-stage detection:
+- Primary: Tukey outer fence (Q3 + 3.0 × IQR) applied to raw `volume_units`
+  as a univariate signal — independent of the baseline/incremental decomposition
+- Secondary: invariant cross-validation — deviation
+  (volume_units − baseline_volume − incremental_volume) > 1.0 confirms that
+  IQR-flagged rows are genuine data corruption, not distribution artefacts
 
 **Rationale**
-fact_sales volume has a legitimately right-skewed distribution: lognormal
-baseline + independent promotional incremental (20–50% uplift). The standard
-inner fence (Q3 + 1.5 × IQR) would flag legitimate high-uplift promotional
-weeks as outliers, inflating the is_volume_outlier rate well beyond the injected
-~2%. The outer fence (3.0×) is the established convention for datasets with
-legitimate extreme values in the upper tail. Critically, the deviation metric
-normalises for promotional uplift — clean rows have deviation = 0 by
-construction (volume_units = baseline + incremental exactly). Only injected
-outlier rows (where volume_units was overwritten to 5–10× baseline while
-baseline and incremental were left unchanged) produce deviations large enough
-to exceed the outer fence.
+The primary signal is raw `volume_units` rather than the deviation metric
+for a deliberate analytical reason: in production, an analyst receiving
+fact_sales data from a source system would not have access to decomposed
+baseline and incremental columns — those are model outputs, not source
+system fields. Applying the IQR fence to `volume_units` directly mirrors
+the technique that would be used on real data, making the approach
+generalisable and defensible beyond the synthetic context.
+
+The outer fence (3.0× IQR) is used rather than the standard inner fence
+(1.5× IQR) because fact_sales volume is legitimately right-skewed:
+lognormal baseline + independent promotional incremental (20–50% uplift)
+produces a distribution with a genuine upper tail of high-volume weeks.
+The inner fence would flag legitimate high-uplift promotional rows as
+outliers, inflating the detection rate well beyond the injected ~2%.
+
+The invariant cross-validation serves as a secondary confirmation layer.
+On clean rows, volume_units = baseline_volume + incremental_volume exactly
+by construction, so deviation = 0. QI-04 overwrites volume_units to 5–10×
+baseline while leaving the decomposed columns unchanged, producing a large
+positive deviation on every injected row. Agreement between the IQR flag
+and the invariant violation (n_agreement ≈ n_outliers) confirms two things:
+the statistical detections are not false positives caused by the right-skewed
+distribution, and the injection mechanism worked as intended. This is
+effectively a built-in ground-truth validation that is only possible because
+the project uses synthetic data with known injection parameters — a
+methodological advantage explicitly cited in the AM1 report.
 
 **Alternatives considered**
-- Standard inner fence (1.5×): rejected — over-flags legitimate 50% promotional
-  uplift weeks; inflates flagging rate beyond injected ~2%
-- Z-score threshold (e.g. >3σ): rejected — assumes normality; volume deviation
-  distribution is lognormal and right-skewed, violating the normality assumption
-- Absolute threshold (e.g. deviation > 500 units): rejected — not generalisable
+- IQR on deviation metric as primary signal: rejected — deviation is only
+  available because baseline and incremental columns exist in this synthetic
+  dataset; would not be applicable on real source system data
+- Standard inner fence (1.5×): rejected — over-flags legitimate 50%
+  promotional uplift weeks; inflates detection rate beyond injected ~2%
+- Z-score threshold (e.g. >3σ): rejected — assumes normality; volume
+  distribution is lognormal and right-skewed, violating the assumption
+- Absolute threshold (e.g. volume_units > 500): rejected — not generalisable
   across SKUs with different baseline volume scales
 
-**KSB mapping** K3, S11, S26
+**KSB mapping** K3, S11, S26, K26
 **Implementation** `preprocess.py` → `flag_fact_sales()`, `IQR_MULTIPLIER = 3.0`
 **EDA evidence** `03_volume_deviation_hist.png`, `04_volume_outlier_scatter.png`
 
@@ -815,16 +837,44 @@ invariant-based detection.
 
 ---
 
+### ADR-024 — DuckDB selected as the query engine (over Pandas, SQLite, and cloud DW)
+
+**Context** The NL2SQL layer (F-08, F-09) generates SQL strings that must be executed against the processed Parquet dataset (~2.3M rows in fact_sales) at conversational latency. A query engine is required. Four candidates evaluated: DuckDB, Pandas, SQLite, and managed cloud data warehouses (BigQuery / Snowflake).
+
+**Decision** Use DuckDB (in-memory, Parquet views) as the sole query execution engine.
+
+**Rationale** DuckDB is a columnar OLAP engine with native Parquet support, full ANSI SQL including window functions, a Python API, and sub-second performance on multi-million row aggregations with zero server infrastructure. It executes SQL strings directly — the exact output of the NL2SQL pipeline — with no translation layer. In-memory operation over Parquet views avoids storage duplication: the processed Parquet files are the store of record, and every call to get_connection() reads from the current preprocessed layer with no staleness risk.
+
+Pandas rejected: Pandas has no SQL execution interface. The NL2SQL layer produces SQL strings; executing them against a DataFrame would require an additional pandas-to-SQL translation layer (e.g. pandasql), adding complexity, a dependency, and a failure surface that does not exist with a native SQL engine.
+
+SQLite rejected: SQLite is row-oriented and was designed for transactional workloads, not OLAP aggregations. On the ~2.3M row fact_sales table, GROUP BY and window queries would be unlikely to meet the <2-second benchmark targets. SQLite also has no native Parquet support — data would need to be loaded into a .db file, creating a persistent storage layer that must be kept in sync with the preprocessed Parquet files.
+
+Cloud DW (BigQuery / Snowflake) rejected: Both require provisioned infrastructure, credential management, network access, and data egress. These dependencies are incompatible with a local zero-infrastructure prototype and would introduce latency, cost, and complexity that cannot be justified at this scale.
+
+In-memory over persistent .db: Parquet files in data/processed/ are the single authoritative data store. A persistent .db file would duplicate storage and create a sync risk if preprocess.py is re-run — the .db would become stale unless explicitly rebuilt. In-memory DuckDB with read_parquet() views eliminates this risk: the connection always reflects the current processed layer.
+
+**Alternatives considered**
+
+- Pandas (pandasql): rejected — no native SQL interface; requires translation layer
+- SQLite: rejected — row-oriented; poor OLAP performance; no native Parquet support
+- BigQuery / Snowflake: rejected — infrastructure, credentials, egress; incompatible with local prototype
+- Persistent DuckDB .db file: rejected — storage duplication; sync risk with Parquet store of record
+
+**KSB mapping** K13, K14, S15, S25 **Implementation**
+
+- `src/db.py` → `get_connection()` — in-memory DuckDB, four Parquet views
+- `scripts/benchmark_duckdb.py` → F-03 acceptance benchmark (Q1–Q3 timing, V1–V3 validation)
+
 ## Pending Decisions (Sprint 2 onwards)
 
 The following will be added as ADRs once decisions are made in Sprint 2:
 
-- ADR-024 — Gemini 2.5 Flash vs Gemini 1.5 Flash model selection (F-06)
-- ADR-025 — RAG schema injection strategy: full schema vs chunked retrieval (F-07)
-- ADR-026 — Self-correction retry loop: 2 retries vs unlimited (F-09)
-- ADR-027 — Streamlit session state management approach (Sprint 4)
-- ADR-028 — JSONL logging schema design (Sprint 4)
-- ADR-029 — Hypothesis test selection for Sprint 5 evaluation
+- ADR-025 — Gemini 2.5 Flash vs Gemini 1.5 Flash model selection (F-06)
+- ADR-026 — RAG schema injection strategy: full schema vs chunked retrieval (F-07)
+- ADR-027 — Self-correction retry loop: 2 retries vs unlimited (F-09)
+- ADR-028 — Streamlit session state management approach (Sprint 4)
+- ADR-029 — JSONL logging schema design (Sprint 4)
+- ADR-030 — Hypothesis test selection for Sprint 5 evaluation
 
 ---
 
