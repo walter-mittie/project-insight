@@ -352,32 +352,51 @@ def plot_volume_deviation_hist(fs_dirty: pd.DataFrame) -> None:
     5–10× baseline while baseline + incremental were left unchanged,
     producing a large positive deviation.
 
-    The vertical dashed line marks the Tukey outer fence (Q3 + 3.0 × IQR),
-    the threshold used by preprocess.py for the is_volume_outlier flag.
+    The vertical dashed line marks the minimum deviation among rows
+    flagged by the primary IQR detection (IQR on raw volume_units —
+    matching preprocess.py).  A fence on the deviation distribution
+    itself is not used because 98% of rows have deviation = 0, making
+    Q1 = Q3 = 0 and IQR = 0 — the fence would collapse to zero and
+    render at the wrong position.
+
     Log y-scale is used because the distribution has a dominant 0-spike
     alongside a thin but meaningful extreme tail.
     """
-    # Sample for performance — outliers are rare, oversample the tail
-    sample_normal = fs_dirty.sample(n=min(SAMPLE_HIST, len(fs_dirty)), random_state=42)
-    dev = (
-        sample_normal["volume_units"]
-        - sample_normal["baseline_volume"]
-        - sample_normal["incremental_volume"]
+    # ── 1. Sample for histogram performance ───────────────────────────────────
+    sample = fs_dirty.sample(n=min(SAMPLE_HIST, len(fs_dirty)), random_state=42)
+    dev_sample = (
+        sample["volume_units"]
+        - sample["baseline_volume"]
+        - sample["incremental_volume"]
     )
 
-    # Replicate preprocess.py IQR calculation on the full dataset for accuracy
+    # ── 2. Primary detection fence: IQR on raw volume_units (full dataset) ────
+    # Matches preprocess.py exactly — used to derive n_outliers and to
+    # identify which rows are flagged so we can find the visual separator.
+    q1_vol    = fs_dirty["volume_units"].quantile(0.25)
+    q3_vol    = fs_dirty["volume_units"].quantile(0.75)
+    iqr_vol   = q3_vol - q1_vol
+    fence_vol = q3_vol + IQR_MULTIPLIER * iqr_vol
+    n_outliers = (fs_dirty["volume_units"] > fence_vol).sum()
+
+    # ── 3. Deviation on full dataset ──────────────────────────────────────────
     dev_full = (
         fs_dirty["volume_units"]
         - fs_dirty["baseline_volume"]
         - fs_dirty["incremental_volume"]
     )
-    q1 = dev_full.quantile(0.25)
-    q3 = dev_full.quantile(0.75)
-    iqr = q3 - q1
-    fence = q3 + IQR_MULTIPLIER * iqr
-    n_outliers = (dev_full > fence).sum()
 
-    df_plot = pd.DataFrame({"Volume Deviation": dev})
+    # ── 4. Visual separator = minimum deviation among flagged rows ────────────
+    # The IQR fence is in volume_units space; this histogram is in deviation
+    # space.  Rather than computing a fence on the degenerate deviation
+    # distribution (98% zeros → IQR = 0 → fence collapses to zero), we find
+    # the leftmost edge of the outlier cluster: the smallest deviation value
+    # among rows the primary detection already flagged.
+    flagged_mask   = fs_dirty["volume_units"] > fence_vol
+    fence_dev_line = dev_full[flagged_mask].min()
+
+    # ── 5. Build histogram ────────────────────────────────────────────────────
+    df_plot = pd.DataFrame({"Volume Deviation": dev_sample})
 
     fig = px.histogram(
         df_plot,
@@ -396,24 +415,24 @@ def plot_volume_deviation_hist(fs_dirty: pd.DataFrame) -> None:
         template=TEMPLATE,
     )
 
-    # Tukey outer fence line
+    # ── 6. Vertical separator line ────────────────────────────────────────────
     fig.add_vline(
-        x=fence,
+        x=fence_dev_line,
         line_dash="dash",
         line_color=C_DIRTY,
         line_width=2.5,
     )
-    # Fence annotation
+
+    # ── 7. Annotation ─────────────────────────────────────────────────────────
     fig.add_annotation(
-        x=fence,
+        x=fence_dev_line,
         y=1,
         xref="x",
         yref="paper",
-        text=(
-            _wrap_annotation(
-                f"Tukey outer fence<br>Q3 + {IQR_MULTIPLIER}× IQR = {fence:,.0f}<br>"
-                f"{n_outliers:,} rows flagged ({n_outliers / len(fs_dirty):.1%})"
-            )
+        text=_wrap_annotation(
+            f"Leftmost flagged deviation: {fence_dev_line:,.0f}  |  "
+            f"{n_outliers:,} rows flagged as is_volume_outlier ({n_outliers / len(fs_dirty):.1%})  |  "
+            f"Primary detection: IQR on raw volume_units (fence = {fence_vol:,.0f})"
         ),
         showarrow=True,
         arrowhead=2,
@@ -425,33 +444,34 @@ def plot_volume_deviation_hist(fs_dirty: pd.DataFrame) -> None:
         bgcolor="white",
     )
 
+    # ── 8. Layout ─────────────────────────────────────────────────────────────
     fig.update_layout(
         font=dict(size=13),
         title_font_size=15,
         xaxis=dict(title="Deviation from Expected (units)"),
         yaxis=dict(title="Row Count (log scale)"),
-        annotations=fig.layout.annotations
-        + (
+        annotations=list(fig.layout.annotations) + [
             dict(
                 x=0.5,
                 y=-0.13,
                 xref="paper",
                 yref="paper",
                 showarrow=False,
-                text=(
-                    _wrap_annotation(
-                        "Deviation = 0 for all clean rows (volume_units = baseline + incremental by construction).  "
-                        f"Injected outliers at 5–10× baseline produce large positive deviations well beyond the fence."
-                    )
+                text=_wrap_annotation(
+                    "Deviation = 0 for all clean rows (volume_units = baseline + incremental "
+                    "by construction).  Injected outliers at 5–10× baseline produce large "
+                    "positive deviations.  Vertical line marks the leftmost flagged deviation — "
+                    "all points to its right were flagged via IQR on raw volume_units "
+                    "in preprocess.py."
                 ),
                 font=dict(size=11, color=C_NEUTRAL),
-            ),
-        ),
+            )
+        ],
         margin=dict(b=130),
     )
 
     _save(fig, "03_volume_deviation_hist.png")
-
+    
 
 # ==============================================================================
 # PLOT 04 — QI-04: Baseline vs actual volume scatter, outliers highlighted
@@ -482,21 +502,17 @@ def plot_volume_outlier_scatter(fs_dirty: pd.DataFrame) -> None:
     """
     SAMPLE_OUTLIER = 2_000  # outlier sample cap — local constant
 
-    # ── 1. Compute IQR fence on full dataset (matches preprocess.py) ──────────
-    dev_full = (
-        fs_dirty["volume_units"]
-        - fs_dirty["baseline_volume"]
-        - fs_dirty["incremental_volume"]
-    )
-    q1 = dev_full.quantile(0.25)
-    q3 = dev_full.quantile(0.75)
-    iqr = q3 - q1
+    # ── 1. Compute IQR fence on raw volume_units (matches preprocess.py) ──────
+    # Primary detection method: univariate IQR on volume_units directly,
+    # independent of baseline/incremental decomposition.
+    q1    = fs_dirty["volume_units"].quantile(0.25)
+    q3    = fs_dirty["volume_units"].quantile(0.75)
+    iqr   = q3 - q1
     fence = q3 + IQR_MULTIPLIER * iqr
 
     # ── 2. Apply flag to full dataset, then split ─────────────────────────────
     fs_flagged = fs_dirty.copy()
-    fs_flagged["_dev"] = dev_full
-    fs_flagged["Outlier"] = (fs_flagged["_dev"] > fence).map(
+    fs_flagged["Outlier"] = (fs_flagged["volume_units"] > fence).map(
         {True: "Flagged (is_volume_outlier)", False: "Normal"}
     )
 
