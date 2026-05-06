@@ -1,0 +1,219 @@
+---
+feature: F-04
+version: 1.0
+last_updated: 2026-05-06
+source_layer: data/processed/
+tables: dim_product · dim_customer · fact_sales · fact_market
+---
+
+# Schema & Semantic Data Dictionary
+## FMCG Analytics — Processed Layer
+
+All tables are DuckDB-queryable Parquet files in `data/processed/`.
+This is the **only** layer the application queries. Raw and QI-injected
+layers are never accessed at query time.
+
+---
+
+## 1. dim_product
+
+Grain: one row per SKU. 552 rows (497 `is_active = TRUE`).
+
+| Column | Type | Definition |
+|---|---|---|
+| product_id | VARCHAR PK | Surrogate key. Format: `SKU-NNNN` |
+| sku_name | VARCHAR | Display name: "Brand Variant PackSize PackType" |
+| brand | VARCHAR | Parent brand. Joins to `fact_market.brand` |
+| sub_brand | VARCHAR | Sub-line within brand; may equal brand for simple SKUs |
+| category | VARCHAR | 6 values: Dairy, Cereals, Beverages, Snacks, Confectionery, Frozen Food |
+| sub_category | VARCHAR | 22 values. Aligns with `fact_market.sub_category` |
+| price_tier | VARCHAR | Brand-level attribute: Premium / Mainstream / Value. Not SKU-level |
+| pack_size | INTEGER | Numeric quantity (no unit — see pack_size_uom) |
+| pack_size_uom | VARCHAR | Unit of measure: ml / g / units |
+| pack_type | VARCHAR | Packaging format normalised to title case (e.g. Can, Pot, Bag) |
+| variant | VARCHAR | Flavour/recipe descriptor normalised to title case |
+| list_price_gbp | FLOAT | Manufacturer list price. Basis for gross_revenue in fact_sales |
+| cost_price_gbp | FLOAT | Manufacturer cost. Use for gross margin only; not in fact_market |
+| launch_date | DATE | SKU launch date |
+| is_active | BOOLEAN | TRUE = currently ranging. Filter active SKUs: `WHERE is_active = TRUE` |
+
+---
+
+## 2. dim_customer
+
+Grain: one row per customer account. 240 rows across 5 channels, 15 banners.
+
+| Column | Type | Definition |
+|---|---|---|
+| customer_id | VARCHAR PK | Surrogate key. Format: `CUST-NNN` |
+| customer_name | VARCHAR | Account display name |
+| channel | VARCHAR | 5 values: Grocery, Discounter, Convenience, eCommerce, Foodservice |
+| banner | VARCHAR | 15 values. Joins to `fact_market.banner` and `fact_sales` via customer_id |
+| region | VARCHAR | Geographic region. **Structurally NULL for eCommerce** (operates nationally) |
+| territory | VARCHAR | Sub-region within region. NULL imputed to `"Unknown-{Channel}"` where missing |
+| account_type | VARCHAR | Key Account / Regional Multiple / Independent |
+| store_count | INTEGER | Physical outlet count. NULLs imputed with channel median in processed layer |
+
+---
+
+## 3. fact_sales
+
+Grain: one row per transaction (SKU × customer account × week). ~2.3M rows.
+Date range: 104 ISO weeks, 2024-01-01 – 2025-12-29.
+
+| Column | Type | Definition |
+|---|---|---|
+| transaction_id | BIGINT PK | Surrogate key |
+| week_date | DATE | Monday of ISO week |
+| year | INTEGER | 2024 or 2025 |
+| quarter | INTEGER | 1–4 |
+| month | INTEGER | 1–12 |
+| week_number | INTEGER | ISO week number (1–53) |
+| product_id | VARCHAR FK | → dim_product.product_id |
+| customer_id | VARCHAR FK | → dim_customer.customer_id |
+| volume_units | INTEGER | Total units sold: `baseline_volume + incremental_volume` on clean rows only. See flag: `is_volume_outlier` |
+| gross_revenue_gbp | FLOAT | `volume_units × list_price_gbp`. Revenue before trade investment |
+| trade_discount_gbp | FLOAT | Total promotional + contractual discount |
+| net_revenue_gbp | FLOAT | `gross_revenue_gbp − trade_discount_gbp`. Exclude rows where `is_zero_price = TRUE` |
+| sku_net_price_gbp | FLOAT | Manufacturer's net realised price per unit post-discount. `trade_discount per unit = list_price_gbp − sku_net_price_gbp`. Exclude rows where `is_zero_price = TRUE` |
+| is_promoted | BOOLEAN | TRUE = row is part of a promotional event. Authoritative promotional flag |
+| promotion_mechanic | VARCHAR | Mechanic type (e.g. Price Reduction, Multibuy). **Nullable — see constraint C1** |
+| baseline_volume | INTEGER | Modelled baseline (non-promo underlying demand) |
+| incremental_volume | INTEGER | Promo-driven uplift above baseline. Zero for non-promoted rows |
+| is_zero_price | BOOLEAN | **QI-03 flag.** TRUE where `sku_net_price_gbp = 0`. Exclude from all revenue KPIs |
+| is_volume_outlier | BOOLEAN | **QI-04 flag.** TRUE where `volume_units` exceeds Tukey outer fence (Q3 + 3×IQR). Exclude from volume invariant checks and aggregations requiring clean decomposition |
+
+---
+
+## 4. fact_market
+
+Grain: one row per week × brand × sub_category × banner. ~44K rows.
+Panel measurement data (Nielsen/Kantar convention). Date range aligns with fact_sales.
+
+**This table cannot be directly joined to fact_sales — different grains. See join pattern below.**
+
+| Column | Type | Definition |
+|---|---|---|
+| measurement_id | BIGINT PK | Surrogate key |
+| week_date | DATE | Monday of ISO week. Aligns with fact_sales.week_date |
+| year | INTEGER | 2024 or 2025 |
+| quarter | INTEGER | 1–4 |
+| month | INTEGER | 1–12 |
+| week_number | INTEGER | ISO week number |
+| brand | VARCHAR | Brand name. Joins to dim_product.brand |
+| sub_category | VARCHAR | Subcategory. Joins to dim_product.sub_category |
+| banner | VARCHAR | Retail banner. Joins to dim_customer.banner |
+| brand_volume_units | INTEGER | Units sold for this brand in this banner × week |
+| brand_value_gbp | FLOAT | Value of brand sales at RSP (consumer shelf price) |
+| total_category_volume_units | INTEGER | Total market units across all brands in sub_category × banner × week |
+| total_category_value_gbp | FLOAT | Total market value at RSP across all brands |
+| numeric_distribution_outlets | INTEGER | Number of outlets stocking this brand |
+| total_outlets_in_banner | INTEGER | Total outlets in banner (distribution denominator) |
+| avg_shelf_price_gbp | FLOAT | Brand-level **weekly average RSP**. Consumer-facing price as measured at the till. Not an SKU price. Not manufacturer net price. See constraint C4 |
+| is_zero_shelf_price | BOOLEAN | **QI-06 flag.** TRUE where `avg_shelf_price_gbp = 0`. Exclude from price_index and implied margin calculations |
+| is_vol_violation | BOOLEAN | **QI-07 flag.** TRUE where `brand_volume_units > total_category_volume_units`. All share and index measures are NaN for these rows |
+
+---
+
+## 5. Derived Measures
+
+Computed during preprocessing and stored in `data/processed/fact_market.parquet`.
+These are **pre-computed columns** — do not recompute in SQL unless cross-checking.
+Always apply the flag filters below before using these measures.
+
+| Measure | Formula | NaN When |
+|---|---|---|
+| market_share_volume_pct | `brand_volume_units / total_category_volume_units × 100` | `is_vol_violation = TRUE` |
+| market_share_value_pct | `brand_value_gbp / total_category_value_gbp × 100` | `is_vol_violation = TRUE` |
+| numeric_distribution_pct | `numeric_distribution_outlets / total_outlets_in_banner × 100` | `total_outlets_in_banner = 0` |
+| price_index | `avg_shelf_price_gbp / (total_category_value_gbp / total_category_volume_units) × 100` | `is_vol_violation = TRUE` OR `is_zero_shelf_price = TRUE` |
+
+---
+
+## 6. Critical Semantic Constraints
+
+**C1 — NULL promotion_mechanic ≠ non-promotional**
+Filter on `is_promoted = TRUE` to identify promoted rows. Never filter on
+`promotion_mechanic IS NOT NULL` — this silently excludes ~22% of promoted
+volume where the mechanic was not captured by the POS/TPM system.
+
+**C2 — Missing rows in fact_market ≠ zero sales**
+Temporal gaps are absent panel measurements, not zero sales events.
+Always use `COUNT(DISTINCT week_date)` per group — never assume 104 weeks.
+Missing rows represent structural gaps in panel reporting coverage.
+
+**C3 — fact_sales cannot be directly joined to fact_market**
+Different grains: fact_sales is SKU × account × week; fact_market is
+brand × sub_category × banner × week. Direct join produces a fan-out.
+Aggregate fact_sales to brand × banner × week first, then join. See Section 7.
+
+**C4 — avg_shelf_price_gbp is a brand-level weekly average RSP**
+This is the consumer shelf price as measured at the till (Nielsen/Kantar
+convention), averaged across the brand's SKUs in that banner × week.
+It is not an SKU-level price and not the manufacturer's net invoice price.
+Manufacturer net price lives in `fact_sales.sku_net_price_gbp`.
+
+**C5 — Implied retailer margin requires a cross-table join**
+`(avg_shelf_price_gbp − AVG(sku_net_price_gbp)) / avg_shelf_price_gbp`
+This requires aggregating `fact_sales` to brand × banner × week first (C3).
+Cannot be computed from `fact_market` alone.
+
+**C6 — baseline_volume + incremental_volume = volume_units (clean rows only)**
+This invariant holds only where `is_volume_outlier = FALSE`. On outlier-flagged
+rows, `volume_units` was inflated without adjusting the decomposed columns.
+Do not use this invariant as a filter criterion — use `is_volume_outlier` instead.
+
+---
+
+## 7. Flag Exclusion Patterns
+
+| Flag | Value | Exclude From |
+|---|---|---|
+| is_zero_price | TRUE | All revenue KPIs: net_revenue_gbp, gross_revenue_gbp, sku_net_price_gbp aggregations |
+| is_volume_outlier | TRUE | Volume totals requiring clean decomposition; baseline/incremental invariant checks |
+| is_zero_shelf_price | TRUE | price_index; implied retailer margin calculations |
+| is_vol_violation | TRUE | market_share_volume_pct, market_share_value_pct, price_index (all are NaN) |
+
+---
+
+## 8. Join Pattern: fact_sales → fact_market
+
+**Never join these tables directly.** Aggregate fact_sales to
+`brand × banner × week` grain first, then join on those three keys.
+
+```sql
+-- Standard pattern: manufacturer net revenue vs panel market share
+WITH sales_agg AS (
+    SELECT
+        fs.week_date,
+        dp.brand,
+        dc.banner,
+        SUM(fs.net_revenue_gbp)   AS net_revenue_gbp,
+        SUM(fs.volume_units)      AS volume_units
+    FROM fact_sales fs
+    JOIN dim_product  dp ON fs.product_id  = dp.product_id
+    JOIN dim_customer dc ON fs.customer_id = dc.customer_id
+    WHERE fs.is_zero_price     = FALSE   -- C1: exclude price-zero rows
+      AND fs.is_volume_outlier = FALSE   -- exclude outlier rows from totals
+    GROUP BY fs.week_date, dp.brand, dc.banner
+)
+SELECT
+    sa.week_date,
+    sa.brand,
+    sa.banner,
+    sa.net_revenue_gbp,
+    sa.volume_units,
+    fm.market_share_volume_pct,
+    fm.avg_shelf_price_gbp,
+    fm.price_index
+FROM sales_agg sa
+JOIN fact_market fm
+    ON  sa.week_date = fm.week_date
+    AND sa.brand     = fm.brand
+    AND sa.banner    = fm.banner
+WHERE fm.is_vol_violation    = FALSE   -- exclude corrupt share rows
+  AND fm.is_zero_shelf_price = FALSE;  -- exclude price-zero market rows
+```
+
+**Join keys:** `week_date`, `brand`, `banner`
+**Not available as a join key:** `sub_category` (fact_sales has no sub_category column — derive via dim_product join if needed)
