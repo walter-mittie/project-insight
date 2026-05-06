@@ -1,6 +1,6 @@
 # Decision Log — Project Insight: Agentic Conversational BI
 **AM1 | BCS Level 7 AI Data Specialist | Manu Mohandas | TCS**
-Last updated: 2026-05-05
+Last updated: 2026-05-06
 
 ---
 
@@ -865,16 +865,95 @@ In-memory over persistent .db: Parquet files in data/processed/ are the single a
 - `src/db.py` → `get_connection()` — in-memory DuckDB, four Parquet views
 - `scripts/benchmark_duckdb.py` → F-03 acceptance benchmark (Q1–Q3 timing, V1–V3 validation)
 
+## Schema & LLM Grounding Decisions
+
+---
+
+### ADR-025 — Schema dictionary format: Markdown over JSON/YAML
+
+**Context**
+F-04 required a format decision before drafting the schema & semantic data
+dictionary. Three options evaluated: plain Markdown, JSON/YAML, and a hybrid
+(Markdown wrapper with YAML blocks). The decision has a direct downstream
+effect on how F-07 (RAG-based schema injection) loads and injects the document.
+
+**Decision**
+Plain Markdown.
+
+**Rationale**
+F-07 injection is whole-document: `open(path).read()` into the Gemini system
+prompt on every API call. Structured formats (JSON/YAML) only earn their token
+cost when doing selective field-level retrieval — e.g. vector DB chunk lookup.
+With whole-document injection, JSON/YAML carry syntax overhead (braces, quotes,
+indentation, colons) for zero additional benefit at query time. Token cost
+compounds across hundreds of NL2SQL calls in Sprint 5 evaluation. The six
+critical semantic constraints (C1–C6) are nuanced instructions that transmit
+more reliably to an LLM as numbered prose than as nested YAML keys. Markdown
+is trivially loadable without a parser, editable without tooling, and readable
+as a standalone assessment artefact by an assessor.
+
+**Alternatives considered**
+- JSON/YAML: rejected — 40–60% token overhead for the same information content;
+  no retrieval benefit for whole-document injection; constraints less prominent
+  as nested keys than as numbered prose
+- Hybrid (Markdown wrapper + YAML column blocks): rejected — adds parser
+  complexity for no gain given the whole-document injection pattern; still
+  carries YAML syntax overhead
+
+**KSB mapping** K1, K5, S27
+**Implementation** `docs/schema_data_dictionary.md`
+
+---
+
+### ADR-026 — Schema dictionary location (docs/) and F-07 loader path resolution
+
+**Context**
+F-04 output file needed a location in the project scaffold. Two candidates:
+`docs/` alongside other reference documents, or `src/` alongside application
+source code. The choice directly determines how the F-07 loader in `src/`
+resolves the path.
+
+**Decision**
+`docs/schema_data_dictionary.md`. The F-07 loader in `src/` resolves the path
+via `os.path.abspath()` relative to its own file location:
+
+```python
+BASE_DIR         = os.path.dirname(os.path.abspath(__file__))  # src/
+SCHEMA_DICT_PATH = os.path.join(BASE_DIR, "..", "docs", "schema_data_dictionary.md")
+```
+
+**Rationale**
+ADR-003 reserves `src/` exclusively for executable application modules. The
+schema dictionary contains no executable code and is updated by editing, not
+by running a script — it is a documentation artefact. Placing it in `docs/`
+alongside `data-design.md` and `decision_log.md` reflects its nature and keeps
+the `src/` boundary unambiguous. The relative path resolution pattern is
+consistent with `os.path.abspath(__file__)` already used throughout all
+pipeline scripts. F-04 acceptance criterion 4 is fully satisfied: a schema
+update requires only a document edit — no code change.
+
+**Alternatives considered**
+- `src/schema_data_dictionary.md`: rejected — violates ADR-003; documentation
+  artefacts should not live in the application source directory; conflates
+  editable reference material with executable modules
+
+**KSB mapping** K1, K5, S27
+**Implementation**
+- `docs/schema_data_dictionary.md` — the document itself
+- `src/nl2sql.py` (F-07, Sprint 2) — `SCHEMA_DICT_PATH` constant
+
+---
+
 ## Pending Decisions (Sprint 2 onwards)
 
 The following will be added as ADRs once decisions are made in Sprint 2:
 
-- ADR-025 — Gemini 2.5 Flash vs Gemini 1.5 Flash model selection (F-06)
-- ADR-026 — RAG schema injection strategy: full schema vs chunked retrieval (F-07)
-- ADR-027 — Self-correction retry loop: 2 retries vs unlimited (F-09)
-- ADR-028 — Streamlit session state management approach (Sprint 4)
-- ADR-029 — JSONL logging schema design (Sprint 4)
-- ADR-030 — Hypothesis test selection for Sprint 5 evaluation
+- ADR-027 — Gemini 2.5 Flash vs Gemini 1.5 Flash model selection (F-06)
+- ADR-028 — RAG schema injection strategy: full schema vs chunked retrieval (F-07)
+- ADR-029 — Self-correction retry loop: 2 retries vs unlimited (F-09)
+- ADR-030 — Streamlit session state management approach (Sprint 4)
+- ADR-031 — JSONL logging schema design (Sprint 4)
+- ADR-032 — Hypothesis test selection for Sprint 5 evaluation
 
 ---
 
