@@ -16,17 +16,21 @@ Sprint 1 reference document — last updated: 3 May 2026
 | fact_sales | Fact (transactions) | ~2.3M | data/raw/fact_sales.parquet |
 | fact_market | Fact (market measurements) | ~44K | data/raw/fact_market.parquet |
 
-### Two-layer data architecture
+### Three-layer data architecture
 
 ```
-scripts/generate_data.py    → data/raw/         (raw, with deliberate quality issues)
-scripts/inject_quality_issues.py   → data/raw/         (applies quality issues to raw files)
-scripts/preprocess.py       → data/processed/   (clean, validated, derived measures computed)
+scripts/generate_data.py         →  data/raw/               (clean generated — never modified)
+scripts/inject_quality_issues.py →  data/raw/qi-injected/   (QI-injected — EDA viz reads here)
+scripts/preprocess.py            →  data/processed/          (clean, flagged, derived measures)
+scripts/eda_viz.py               →  data/eda-plots/          (EDA plots — reads qi-injected)
 ```
 
-- `data/raw/` — preserved unchanged after injection. Never queried by the application.
-- `data/processed/` — the operational layer. DuckDB queries only this layer.
-- Application has no knowledge of `data/raw/`. Preprocessing is a one-time batch process.
+- `data/raw/` — immutable. Generated once by `generate_data.py`, never overwritten. The clean baseline.
+- `data/raw/qi-injected/` — quality-issue-injected layer. Derived from raw, never modified after injection.
+  `eda_viz.py` reads from here so visualisations always reflect the dirty state regardless of pipeline order.
+- `data/processed/` — the operational analytics layer. DuckDB queries only this layer.
+  Produced by `preprocess.py` from `qi-injected/`. Application has no knowledge of upstream layers.
+- `data/eda-plots/` — PNG outputs from `eda_viz.py`. Cited in the AM1 project report.
 
 ### Generation order (strict — respect FK dependencies)
 

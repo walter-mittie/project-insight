@@ -6,6 +6,7 @@ venv/
 # Data (Parquet files can be large)
 data/raw/
 data/processed/
+data/eda_plots
 
 # Logs
 logs/
