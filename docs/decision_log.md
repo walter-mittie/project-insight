@@ -1,6 +1,6 @@
 # Decision Log — Project Insight: Agentic Conversational BI
 **AM1 | BCS Level 7 AI Data Specialist | Manu Mohandas | TCS**
-Last updated: 2026-05-06
+Last updated: 2026-05-07
 
 ---
 
@@ -944,17 +944,171 @@ update requires only a document edit — no code change.
 
 ---
 
-## Pending Decisions (Sprint 2 onwards)
+## Pending Decisions (Sprint 3 onwards)
 
-The following will be added as ADRs once decisions are made in Sprint 2:
+The following will be added as ADRs once decisions are made:
 
-- ADR-027 — Gemini 2.5 Flash vs Gemini 1.5 Flash model selection (F-06)
-- ADR-028 — RAG schema injection strategy: full schema vs chunked retrieval (F-07)
-- ADR-029 — Self-correction retry loop: 2 retries vs unlimited (F-09)
-- ADR-030 — Streamlit session state management approach (Sprint 4)
-- ADR-031 — JSONL logging schema design (Sprint 4)
-- ADR-032 — Hypothesis test selection for Sprint 5 evaluation
+- ADR-030 — Self-correction retry loop: 2 retries vs unlimited (Sprint 3)
+- ADR-031 — Streamlit session state management approach (Sprint 4)
+- ADR-032 — JSONL logging schema design (Sprint 4)
+- ADR-033 — Hypothesis test selection for Sprint 5 evaluation
+- ADR-034 — JSON vs. Chain of Thought Prompting (Sprint 2 Discussion)
+- ADR-035 — `docs/few_shot_examples.json` and a function to load it (Sprint 2 Discussion)
 
 ---
+
+## Sprint 2 Decisions
+
+---
+
+### ADR-027 — Gemini model selection: 2.5 Flash vs 1.5 Flash
+
+**Context**
+F-06 required a Gemini model to be selected and pinned before the NL2SQL
+layer could be implemented.  The model choice has implications for context
+window size (critical for whole-schema RAG injection in F-07), chain-of-thought
+reasoning quality (critical for F-08), and token cost (relevant for Sprint 5
+evaluation which will execute hundreds of test queries).
+
+Two candidates were evaluated:
+- `gemini-2.5-flash` — latest available model at time of Sprint 2
+- `gemini-1.5-flash` — stable fallback; smaller context window (128K tokens)
+
+Pre-sprint verification confirmed that `gemini-2.5-flash` is available on the
+Google AI Studio free tier via the `google-genai` SDK (v1.75.0).  The model
+string `"gemini-2.5-flash"` was accepted by the API without error.
+
+**Decision**
+`gemini-2.5-flash`.  Model string pinned in `src/llm.py` as:
+    MODEL = "gemini-2.5-flash"
+
+**Rationale**
+Gemini 2.5 Flash provides a 1,000,000-token context window versus 128K for
+1.5 Flash.  The schema_data_dictionary.md is approximately 900–1,200 estimated
+tokens.  While both models accommodate the schema comfortably, the 2.5 Flash
+extended context window ensures the full schema plus multi-turn conversation
+history (Sprint 3) plus the user question can never overflow the context, even
+if the schema grows during iterations.  Gemini 2.5 Flash also has materially
+stronger instruction-following and structured-output performance — important
+for the ```sql delimiter extraction pattern in F-08.  Both models are available
+on the free tier, eliminating cost as a differentiating factor for the prototype.
+
+**Fallback plan**
+If `gemini-2.5-flash` becomes unavailable on the free tier during the Sprint 5
+evaluation period, the fallback is `gemini-1.5-flash`.  One-line change in
+`src/llm.py` at the `MODEL` constant.  No other code changes required.
+
+**Alternatives considered**
+- `gemini-1.5-flash`: available on free tier; 128K context window sufficient
+  for current schema (~1K tokens); rejected in favour of 2.5 Flash for its
+  larger context headroom and stronger CoT performance
+- Gemini Pro variants: not available on free tier at time of Sprint 2
+
+**KSB mapping** K1, K13, S15, S25
+**Implementation** `src/llm.py` → `MODEL` constant
+
+---
+
+### ADR-028 — RAG schema injection strategy: full-document vs chunked retrieval
+
+**Context**
+F-07 required a decision on how to inject the schema_data_dictionary.md into
+the Gemini system prompt.  Two strategies were considered:
+
+Option A — Full-document injection: load the entire markdown file via
+`open(path).read()` and prepend it to every system prompt as a single block.
+
+Option B — Chunked retrieval: split the schema into sections (column
+definitions, constraints, join patterns), embed each chunk, and retrieve only
+the relevant chunks per query using a vector database.
+
+**Decision**
+Full-document injection (Option A).
+
+**Rationale**
+Schema token count is approximately 900–1,200 estimated tokens — well under
+0.2% of Gemini 2.5 Flash's 1,000,000-token context window.  At this scale,
+chunked retrieval adds architectural complexity (embedding model, vector DB,
+retrieval pipeline, chunk boundary decisions) for no measurable benefit.
+Full injection guarantees the model always has access to all six semantic
+constraints (C1–C6), all flag exclusion patterns, and the complete join
+guidance, on every query.  Partial chunk retrieval would risk omitting C3
+(the fact_sales → fact_market grain mismatch constraint) on join queries
+where the retrieval step does not surface the join section.  The critical
+semantic constraints are exactly the content most likely to be under-retrieved
+in a chunked system, because they are written as numbered prose rather than
+column-aligned tabular text.
+
+The schema is a single cohesive document: the constraints reference the column
+definitions, the join pattern references the constraints, and the flag exclusion
+patterns reference both.  These cross-references mean chunking would either
+duplicate content across chunks (inflating token cost anyway) or force the
+retrieval step to surface multiple interdependent chunks (increasing retrieval
+complexity).
+
+File-based injection also satisfies F-07 AC3: a schema update requires only
+editing the markdown file — no code change, no re-embedding, no index rebuild.
+
+**Alternatives considered**
+- Chunked retrieval with vector DB (e.g. FAISS, Chroma): rejected — adds
+  retrieval pipeline complexity and a new dependency for no benefit at the
+  schema's ~1K token scale; increases risk of missing critical constraints
+  on relevant queries
+- JSON/YAML schema format with selective field injection: rejected (see
+  ADR-025) — structured format overhead without retrieval benefit at whole-
+  document injection scale
+
+**KSB mapping** K1, K3, S15
+**Implementation**
+- `src/llm.py` → `load_schema_dict()` — file-based loader
+- `src/nl2sql.py` → `generate_sql()` — schema prepended to system prompt
+
+---
+### ADR-029 — KPI columns in fact_market: reference use only; always recompute from components
+
+**Context**
+fact_market.parquet stores four pre-computed KPI columns
+(market_share_volume_pct, market_share_value_pct,
+numeric_distribution_pct, price_index) at grain
+brand × sub_category × banner × week. An initial instruction in the
+schema dictionary (v1.0) told the LLM to use these columns directly.
+This was identified as a semantic error: averaging or summing percentages
+across any dimension (time, banner, sub_category) produces arithmetically
+incorrect results. A business question about quarterly brand share across
+all banners would silently return a wrong number if the LLM applied
+AVG(market_share_volume_pct).
+
+**Decision**
+Pre-computed KPI columns are retained in storage for exact-grain point
+lookups only (e.g. "NitroBoost share in Tesco in week 12"). All other
+queries must recompute KPIs from the underlying numerator and denominator
+components (brand_volume_units, total_category_volume_units, etc.) at
+the required aggregation grain. The schema dictionary (v1.1) replaces
+the derived measures table with four named KPI Computation Patterns
+(P1–P4) that the LLM is instructed to follow for any query requiring
+aggregation across time, banner, sub_category, or channel.
+
+**Rationale**
+Percentage measures are non-additive: the correct share at a coarser
+grain is always SUM(numerator)/SUM(denominator), never an average of
+finer-grain percentages. An NL2SQL system cannot be expected to
+distinguish aggregatable from non-aggregatable columns without explicit
+instruction — the schema dictionary is the only mechanism available to
+enforce this constraint without model fine-tuning. Retaining the columns
+in storage costs nothing and preserves the exact-grain lookup use case.
+
+**Alternatives considered**
+- Remove pre-computed columns from Parquet entirely: rejected — removes
+  a valid exact-grain use case; storage cost is negligible
+- Instruct LLM to recompute only when aggregating: rejected — requires
+  the LLM to reason about whether a given query is aggregating, which
+  is an unreliable inference; blanket recompute instruction is simpler
+  and safer
+
+**KSB mapping** K1, K5, S27 
+**Implementation** docs/schema_data_dictionary.md v1.1 — Section 5
+
+**KSB mapping** K1, K5, S27
+****
 
 *End of decision log. Maintained incrementally — one ADR per decision, at point of decision.*
