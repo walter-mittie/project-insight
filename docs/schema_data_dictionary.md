@@ -1,6 +1,6 @@
 ---
 feature: F-04
-version: 1.0
+version: 1.1
 last_updated: 2026-05-06
 source_layer: data/processed/
 tables: dim_product · dim_customer · fact_sales · fact_market
@@ -115,18 +115,83 @@ Panel measurement data (Nielsen/Kantar convention). Date range aligns with fact_
 
 ---
 
-## 5. Derived Measures
+## 5. KPI Computation Patterns
 
-Computed during preprocessing and stored in `data/processed/fact_market.parquet`.
-These are **pre-computed columns** — do not recompute in SQL unless cross-checking.
-Always apply the flag filters below before using these measures.
+fact_market stores pre-computed share and index columns
+(`market_share_volume_pct`, `market_share_value_pct`,
+`numeric_distribution_pct`, `price_index`) at grain
+`brand × sub_category × banner × week`.
 
-| Measure | Formula | NaN When |
-|---|---|---|
-| market_share_volume_pct | `brand_volume_units / total_category_volume_units × 100` | `is_vol_violation = TRUE` |
-| market_share_value_pct | `brand_value_gbp / total_category_value_gbp × 100` | `is_vol_violation = TRUE` |
-| numeric_distribution_pct | `numeric_distribution_outlets / total_outlets_in_banner × 100` | `total_outlets_in_banner = 0` |
-| price_index | `avg_shelf_price_gbp / (total_category_value_gbp / total_category_volume_units) × 100` | `is_vol_violation = TRUE` OR `is_zero_shelf_price = TRUE` |
+**These columns are grain-locked. Never SUM or AVG them across any
+dimension.** Summing percentages across weeks, banners, or sub-categories
+produces arithmetically incorrect results. Always compute KPIs from the
+underlying numerator and denominator components at the required grain.
+
+Example of the failure:
+```
+Week 1: brand_vol=150, cat_vol=1000 → share=15.0%
+Week 2: brand_vol=200, cat_vol=800  → share=25.0%
+AVG(market_share_volume_pct) = 20.0%          ← WRONG
+Correct:  (150+200)/(1000+800)*100 = 19.4%    ← always recompute
+```
+
+Use the pre-computed columns only for exact point lookups at the
+native grain (e.g. "NitroBoost share in Tesco in week 12 2024").
+For all other queries, use the patterns below.
+
+---
+
+### P1 — Volume market share (any grain)
+```sql
+SUM(brand_volume_units) * 100.0
+    / NULLIF(SUM(total_category_volume_units), 0)
+    AS market_share_volume_pct
+-- Always filter: WHERE is_vol_violation = FALSE
+```
+
+### P2 — Value market share (any grain)
+```sql
+SUM(brand_value_gbp) * 100.0
+    / NULLIF(SUM(total_category_value_gbp), 0)
+    AS market_share_value_pct
+-- Always filter: WHERE is_vol_violation = FALSE
+```
+
+### P3 — Numeric distribution (any grain)
+```sql
+SUM(numeric_distribution_outlets) * 100.0
+    / NULLIF(SUM(total_outlets_in_banner), 0)
+    AS numeric_distribution_pct
+-- Note: aggregating across banners produces a blended rate.
+-- Meaningful for within-banner or total-portfolio queries only.
+```
+
+### P4 — Price index (any grain)
+```sql
+(SUM(brand_value_gbp) / NULLIF(SUM(brand_volume_units), 0))
+    / (SUM(total_category_value_gbp)
+       / NULLIF(SUM(total_category_volume_units), 0))
+    * 100
+    AS price_index
+-- Always filter: WHERE is_vol_violation = FALSE
+--            AND is_zero_shelf_price = FALSE
+```
+
+### P1 example — NitroBoost quarterly share, all banners
+```sql
+SELECT
+    year,
+    quarter,
+    brand,
+    ROUND(SUM(brand_volume_units) * 100.0
+          / NULLIF(SUM(total_category_volume_units), 0), 2)
+                                    AS market_share_volume_pct
+FROM fact_market
+WHERE brand            = 'NitroBoost'
+  AND is_vol_violation = FALSE
+GROUP BY year, quarter, brand
+ORDER BY year, quarter;
+```
 
 ---
 
@@ -145,7 +210,7 @@ Missing rows represent structural gaps in panel reporting coverage.
 **C3 — fact_sales cannot be directly joined to fact_market**
 Different grains: fact_sales is SKU × account × week; fact_market is
 brand × sub_category × banner × week. Direct join produces a fan-out.
-Aggregate fact_sales to brand × banner × week first, then join. See Section 7.
+Aggregate fact_sales to brand × banner × week first, then join. See Section 8.
 
 **C4 — avg_shelf_price_gbp is a brand-level weekly average RSP**
 This is the consumer shelf price as measured at the till (Nielsen/Kantar
@@ -172,48 +237,111 @@ Do not use this invariant as a filter criterion — use `is_volume_outlier` inst
 | is_zero_price | TRUE | All revenue KPIs: net_revenue_gbp, gross_revenue_gbp, sku_net_price_gbp aggregations |
 | is_volume_outlier | TRUE | Volume totals requiring clean decomposition; baseline/incremental invariant checks |
 | is_zero_shelf_price | TRUE | price_index; implied retailer margin calculations |
-| is_vol_violation | TRUE | market_share_volume_pct, market_share_value_pct, price_index (all are NaN) |
+| is_vol_violation | TRUE | All KPI computations using brand_volume_units, brand_value_gbp, total_category_volume_units, total_category_value_gbp as components; also excludes the grain-locked pre-computed columns |
 
 ---
 
 ## 8. Join Pattern: fact_sales → fact_market
 
-**Never join these tables directly.** Aggregate fact_sales to
-`brand × banner × week` grain first, then join on those three keys.
+**Never join these tables directly.** fact_sales grain is
+`SKU × account × week`; fact_market grain is
+`brand × sub_category × banner × week`. A direct join produces a fan-out.
+
+Two valid patterns depending on whether sub_category is needed:
+
+---
+
+### Pattern A — brand × sub_category × banner × week (preferred)
+
+Use when the question involves sub_category-level market data, or when
+joining to a single sub_category. All four grain keys must be present.
 
 ```sql
--- Standard pattern: manufacturer net revenue vs panel market share
+WITH sales_agg AS (
+    SELECT
+        fs.week_date,
+        dp.brand,
+        dp.sub_category,                       -- required for clean join
+        dc.banner,
+        SUM(fs.net_revenue_gbp)  AS net_revenue_gbp,
+        SUM(fs.volume_units)     AS volume_units
+    FROM fact_sales fs
+    JOIN dim_product  dp ON fs.product_id  = dp.product_id
+    JOIN dim_customer dc ON fs.customer_id = dc.customer_id
+    WHERE fs.is_zero_price     = FALSE
+      AND fs.is_volume_outlier = FALSE
+    GROUP BY fs.week_date, dp.brand, dp.sub_category, dc.banner
+)
+SELECT
+    sa.week_date, sa.brand, sa.sub_category, sa.banner,
+    sa.net_revenue_gbp, sa.volume_units,
+    ROUND(SUM(fm.brand_volume_units) * 100.0
+          / NULLIF(SUM(fm.total_category_volume_units), 0), 2)
+                                         AS market_share_volume_pct,
+    fm.avg_shelf_price_gbp
+FROM sales_agg sa
+JOIN fact_market fm
+    ON  sa.week_date    = fm.week_date
+    AND sa.brand        = fm.brand
+    AND sa.sub_category = fm.sub_category  -- all four keys
+    AND sa.banner       = fm.banner
+WHERE fm.is_vol_violation    = FALSE
+  AND fm.is_zero_shelf_price = FALSE
+GROUP BY sa.week_date, sa.brand, sa.sub_category, sa.banner,
+         sa.net_revenue_gbp, sa.volume_units, fm.avg_shelf_price_gbp;
+```
+
+**Join keys:** `week_date · brand · sub_category · banner`
+
+---
+
+### Pattern B — brand × banner × week (brand-total, no sub_category)
+
+Use when the question is brand-level only and sub_category is not needed.
+fact_market must ALSO be pre-aggregated to brand × banner × week.
+Joining a three-key sales_agg directly to the four-key fact_market grain
+produces a fan-out — one sales row matches multiple fact_market rows.
+
+```sql
 WITH sales_agg AS (
     SELECT
         fs.week_date,
         dp.brand,
         dc.banner,
-        SUM(fs.net_revenue_gbp)   AS net_revenue_gbp,
-        SUM(fs.volume_units)      AS volume_units
+        SUM(fs.net_revenue_gbp)  AS net_revenue_gbp,
+        SUM(fs.volume_units)     AS volume_units
     FROM fact_sales fs
     JOIN dim_product  dp ON fs.product_id  = dp.product_id
     JOIN dim_customer dc ON fs.customer_id = dc.customer_id
-    WHERE fs.is_zero_price     = FALSE   -- C1: exclude price-zero rows
-      AND fs.is_volume_outlier = FALSE   -- exclude outlier rows from totals
+    WHERE fs.is_zero_price     = FALSE
+      AND fs.is_volume_outlier = FALSE
     GROUP BY fs.week_date, dp.brand, dc.banner
+),
+market_agg AS (
+    -- Pre-aggregate fact_market to match sales_agg grain
+    SELECT
+        week_date, brand, banner,
+        SUM(brand_volume_units)          AS brand_volume_units,
+        SUM(brand_value_gbp)             AS brand_value_gbp,
+        SUM(total_category_volume_units) AS total_category_volume_units,
+        SUM(total_category_value_gbp)    AS total_category_value_gbp
+    FROM fact_market
+    WHERE is_vol_violation = FALSE
+    GROUP BY week_date, brand, banner
 )
 SELECT
-    sa.week_date,
-    sa.brand,
-    sa.banner,
-    sa.net_revenue_gbp,
-    sa.volume_units,
-    fm.market_share_volume_pct,
-    fm.avg_shelf_price_gbp,
-    fm.price_index
+    sa.week_date, sa.brand, sa.banner,
+    sa.net_revenue_gbp, sa.volume_units,
+    ROUND(ma.brand_volume_units * 100.0
+          / NULLIF(ma.total_category_volume_units, 0), 2)
+                                         AS market_share_volume_pct
 FROM sales_agg sa
-JOIN fact_market fm
-    ON  sa.week_date = fm.week_date
-    AND sa.brand     = fm.brand
-    AND sa.banner    = fm.banner
-WHERE fm.is_vol_violation    = FALSE   -- exclude corrupt share rows
-  AND fm.is_zero_shelf_price = FALSE;  -- exclude price-zero market rows
+JOIN market_agg ma
+    ON  sa.week_date = ma.week_date
+    AND sa.brand     = ma.brand
+    AND sa.banner    = ma.banner;
 ```
 
-**Join keys:** `week_date`, `brand`, `banner`
-**Not available as a join key:** `sub_category` (fact_sales has no sub_category column — derive via dim_product join if needed)
+**Join keys:** `week_date · brand · banner`
+**Requirement:** fact_market pre-aggregated via market_agg CTE —
+never join sales_agg (3-key grain) directly to fact_market (4-key grain).
