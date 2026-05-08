@@ -49,89 +49,50 @@ based on known model failure modes for NL2SQL tasks:
 
 ---
 
+## v1.1 — Schema v1.1 alignment (Sprint 2)
+
+**Date:** 2026-05-08
+
+**Change made:**
+COT_INSTRUCTION updated to align with schema_data_dictionary.md v1.1.
+Three additions to Step 2 and two additions to Step 4 rules:
+
+Step 2 additions:
+1. Grain-locked column warning — explicit instruction to NEVER SUM or AVG
+   the pre-computed columns (market_share_volume_pct, market_share_value_pct,
+   numeric_distribution_pct, price_index) across any dimension. Directs model
+   to recompute from numerator/denominator components using P1–P4 patterns
+   in Section 5 of the schema.
+2. Pattern A vs Pattern B join selection — explicit decision criteria:
+   Pattern A (4-key join including sub_category) for sub_category-level queries;
+   Pattern B (3-key join with dual pre-aggregation of both fact_sales AND
+   fact_market) for brand-total queries. Explicit warning against joining
+   a 3-key sales_agg to the 4-key fact_market grain.
+
+Step 4 rule additions:
+3. KPI queries must use P1–P4 computation patterns, never the grain-locked
+   pre-computed columns for aggregated queries.
+4. Cross-table join queries must select Pattern A or B as described in Step 2.
+
+**Failure pattern that prompted the change:**
+Schema_data_dictionary.md was enriched to v1.1 in a parallel session
+("Project Insight | Schema Documentation") with two new sections:
+- Section 5: KPI Computation Patterns (P1–P4) with worked example showing
+  why AVG(share) produces incorrect results
+- Section 8: Expanded from one join example to Pattern A (sub_category-level)
+  and Pattern B (brand-total with dual pre-aggregation)
+
+The v1.0 COT_INSTRUCTION referenced C1–C6 constraints but did not address
+the grain-locked column risk or the Pattern A/B selection. Without these
+additions, the model could produce arithmetically incorrect KPI aggregations
+(summing percentages across weeks) and fan-out joins (3-key to 4-key grain
+mismatch) — both silent correctness failures that would pass SQL execution
+but return wrong business answers.
+
+**Location:** `src/nl2sql.py` → `COT_INSTRUCTION` constant
+
+---
+
 *Log updated as prompt versions are iterated during Sprint 2 testing (AC4).*
 *Target: 15 manual test queries across single-table filter, aggregation,*
 *multi-table join, ambiguous term, and time-period filter categories (F-08 AC3).*
-
----
-## Design Decision — Structured Output vs CoT Delimiter Approach
-
-**Date:** 2026-05-08
-
-**Decision:** Retain ```sql delimiter parsing over JSON mode / response_schema
-for Sprint 2. Revisit after 15-query manual test suite.
-
-**Options considered:**
-
-Option A — Raw JSON mode: force `response_mime_type="application/json"` with
-no schema. Eliminates conversational fluff and markdown wrapping. Rejected
-because JSON mode suppresses chain-of-thought reasoning — the model prioritises
-satisfying the structural constraint over reasoning through tables, constraints,
-and disambiguation steps.
-
-Option B — Gemini response_schema (structured output): enforces a typed JSON
-object with `reasoning` (str) and `sql` (str) fields. Preserves CoT in the
-reasoning field; sql field returns clean SQL with no backticks or markdown.
-Parsing becomes json.loads() — no regex. This is the preferred upgrade path
-if delimiter failures are observed in testing.
-
-Option C — Current approach (```sql delimiter + regex): zero-shot CoT
-reasoning preserved in full; SQL extracted via _SQL_PATTERN regex. Introduces
-a `no_sql_delimiter` failure path that Option B would eliminate entirely.
-
-**Why not change it now:** The 15-query manual test suite (F-08 AC3) is the
-diagnostic. Switching before failure data exists is premature optimisation.
-If `no_sql_delimiter` errors appear in more than 1-2 of the 15 queries,
-migrate to response_schema in Sprint 3 when nl2sql.py is already being
-modified for conversation history.
-
-**Upgrade path (if needed):**
-- Add `response_mime_type="application/json"` and `response_schema` to
-  GenerateContentConfig in src/llm.py
-- Replace _extract_sql() and _extract_reasoning() in src/nl2sql.py with
-  json.loads(response.text)
-- Update prompt — instruct model to populate reasoning and sql fields
-  directly, no ```sql block needed
-- Log as prompt v2.0 in this file
-
-**KSB mapping:** K1, K3
-
----
-## Design Decision — Few-Shot Examples (docs/few_shot_examples.json)
-
-**Date:** 2026-05-08
-
-**Decision:** Scaffold built now; population deferred until after 15-query
-manual test suite identifies real failure patterns.
-
-**Rationale:**
-Few-shot Q+SQL pairs are one of the most reliable levers for FMCG-specific
-intent mapping — teaching the model that "top 5 brands" means
-ORDER BY [metric] DESC LIMIT 5, that "revenue" defaults to net_revenue_gbp,
-and that "last year" = 2025 in this dataset. However, writing examples before
-failure data exists means guessing at which quirks need teaching.
-
-**Correct sequence:**
-1. Run 15-query test suite (zero-shot baseline)
-2. Identify failure patterns — which query categories fail and why
-3. Write few-shot examples that target exactly those failure patterns
-4. Re-run failed queries with examples injected — measure improvement
-5. Log each example as a prompt_log entry with before/after evidence
-
-**Assessment value:**
-Zero-shot accuracy on the 15-query benchmark = baseline (H0).
-Few-shot accuracy after targeted examples = treatment (H1).
-This is a legitimate before/after comparison for Sprint 5 hypothesis
-testing (K26). Jumping straight to few-shot collapses this experiment.
-
-**Scaffold location:** docs/few_shot_examples.json
-**Loader function:** load_few_shot_examples() — to be added to src/llm.py
-**Injection point in generate_sql():**
-    system_prompt = f"{schema_text}\n\n{few_shot_block}\n\n---\n\n{COT_INSTRUCTION}"
-    (schema first → examples second → CoT instruction last)
-
-**Graceful degradation:** if few_shot_examples.json absent or empty,
-system runs zero-shot without error — no code change required to
-switch between zero-shot and few-shot modes.
-
-**KSB mapping:** K1, K3, K26
