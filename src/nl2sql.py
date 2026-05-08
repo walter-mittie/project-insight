@@ -90,10 +90,14 @@ patterns P1–P4 in Section 5 of the schema.
 - NEVER join a 3-key sales_agg directly to the 4-key fact_market grain —
   this produces a fan-out.
 
-### Step 3 — Clarify any ambiguous terms
-If the question uses ambiguous FMCG terms (e.g., "revenue" could mean
-gross_revenue_gbp or net_revenue_gbp; "last year" requires a specific year
-filter based on the data range 2024–2025), state your interpretation.
+### Step 3 — Clarify any ambiguous business terms
+If the question uses ambiguous FMCG terms, state your interpretation before
+writing SQL. Common ambiguities:
+- "revenue" → default to net_revenue_gbp unless "gross" is explicitly stated
+- "market share" → default to volume share unless "value share" is specified
+- "top N brands" → state the metric used for ranking (e.g. net_revenue_gbp)
+- "price" → distinguish between sku_net_price_gbp (manufacturer net) and
+  avg_shelf_price_gbp (consumer shelf price from fact_market)
 
 ### Step 4 — Write the SQL
 Write valid DuckDB SQL inside a fenced code block exactly like this:
@@ -111,8 +115,9 @@ Rules for the SQL block:
 - For any query involving both fact_sales and fact_market, select Pattern A
   or Pattern B as described in Step 2 above and Section 8 of the schema.
 - Use week_date for temporal filters — never assume a column called "date".
-- Time period interpretation: "last year" = year = 2025 (latest full year
-  in the dataset); "this year" = 2025; "Q3" = quarter = 3.
+- Time period rules (dataset covers 2024-01-01 to 2025-12-29 only):
+  "last year" = year = 2024; "this year" = year = 2025 (latest available);
+  "Q3" = quarter = 3; "H1" = quarter IN (1, 2); "H2" = quarter IN (3, 4).
 - Never SELECT * on fact tables — select only the columns required.
 - Terminate the SQL with a semicolon.
 
