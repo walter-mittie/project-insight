@@ -948,12 +948,12 @@ update requires only a document edit — no code change.
 
 The following will be added as ADRs once decisions are made:
 
-- ADR-030 — Self-correction retry loop: 2 retries vs unlimited (Sprint 3)
-- ADR-031 — Streamlit session state management approach (Sprint 4)
-- ADR-032 — JSONL logging schema design (Sprint 4)
-- ADR-033 — Hypothesis test selection for Sprint 5 evaluation
-- ADR-034 — JSON vs. Chain of Thought Prompting (Sprint 2 Discussion)
-- ADR-035 — `docs/few_shot_examples.json` and a function to load it (Sprint 2 Discussion)
+- ADR-031 — Self-correction retry loop: 2 retries vs unlimited (Sprint 3)
+- ADR-032 — Streamlit session state management approach (Sprint 4)
+- ADR-033 — JSONL logging schema design (Sprint 4)
+- ADR-034 — Hypothesis test selection for Sprint 5 evaluation
+- ADR-035 — JSON vs. Chain of Thought Prompting (Sprint 2 Discussion)
+- ADR-036 — `docs/few_shot_examples.json` and a function to load it (Sprint 2 Discussion)
 
 ---
 
@@ -984,23 +984,25 @@ string `"gemini-2.5-flash"` was accepted by the API without error.
 
 **Rationale**
 Gemini 2.5 Flash provides a 1,000,000-token context window versus 128K for
-1.5 Flash.  The schema_data_dictionary.md is approximately 900–1,200 estimated
-tokens.  While both models accommodate the schema comfortably, the 2.5 Flash
+1.5 Flash.  The schema_data_dictionary.md (v1.1) is approximately 2,600
+estimated tokens (~0.26% of the 1M context window).  While both models
+accommodate the schema comfortably, the 2.5 Flash
 extended context window ensures the full schema plus multi-turn conversation
 history (Sprint 3) plus the user question can never overflow the context, even
 if the schema grows during iterations.  Gemini 2.5 Flash also has materially
 stronger instruction-following and structured-output performance — important
-for the ```sql delimiter extraction pattern in F-08.  Both models are available
-on the free tier, eliminating cost as a differentiating factor for the prototype.
+for the ```sql delimiter extraction pattern in F-08.  Initial selection was
+made on the free tier; subsequent quota discovery (20 RPD actual vs 1,500
+published) led to migration to the paid tier — see ADR-030.
 
 **Fallback plan**
-If `gemini-2.5-flash` becomes unavailable on the free tier during the Sprint 5
-evaluation period, the fallback is `gemini-1.5-flash`.  One-line change in
-`src/llm.py` at the `MODEL` constant.  No other code changes required.
+If `gemini-2.5-flash` becomes unavailable or pricing changes materially,
+the fallback is `gemini-1.5-flash`.  One-line change in `src/llm.py` at
+the `MODEL` constant.  No other code changes required.
 
 **Alternatives considered**
 - `gemini-1.5-flash`: available on free tier; 128K context window sufficient
-  for current schema (~1K tokens); rejected in favour of 2.5 Flash for its
+  for current schema (~2.6K tokens); rejected in favour of 2.5 Flash for its
   larger context headroom and stronger CoT performance
 - Gemini Pro variants: not available on free tier at time of Sprint 2
 
@@ -1026,8 +1028,9 @@ the relevant chunks per query using a vector database.
 Full-document injection (Option A).
 
 **Rationale**
-Schema token count is approximately 900–1,200 estimated tokens — well under
-0.2% of Gemini 2.5 Flash's 1,000,000-token context window.  At this scale,
+Schema token count is approximately 2,600 estimated tokens (v1.1, post KPI
+computation patterns and dual join templates) — well under
+0.3% of Gemini 2.5 Flash's 1,000,000-token context window.  At this scale,
 chunked retrieval adds architectural complexity (embedding model, vector DB,
 retrieval pipeline, chunk boundary decisions) for no measurable benefit.
 Full injection guarantees the model always has access to all six semantic
@@ -1052,7 +1055,7 @@ editing the markdown file — no code change, no re-embedding, no index rebuild.
 **Alternatives considered**
 - Chunked retrieval with vector DB (e.g. FAISS, Chroma): rejected — adds
   retrieval pipeline complexity and a new dependency for no benefit at the
-  schema's ~1K token scale; increases risk of missing critical constraints
+  schema's ~2.6K token scale; increases risk of missing critical constraints
   on relevant queries
 - JSON/YAML schema format with selective field injection: rejected (see
   ADR-025) — structured format overhead without retrieval benefit at whole-
@@ -1105,10 +1108,86 @@ in storage costs nothing and preserves the exact-grain lookup use case.
   is an unreliable inference; blanket recompute instruction is simpler
   and safer
 
-**KSB mapping** K1, K5, S27 
+**KSB mapping** K1, K5, S27
 **Implementation** docs/schema_data_dictionary.md v1.1 — Section 5
 
-**KSB mapping** K1, K5, S27
-****
+---
+
+### ADR-030 — Free tier to paid tier migration: quota discovery and cost analysis
+
+**Context**
+ADR-027 initially selected `gemini-2.5-flash` on the Google AI Studio free tier.
+During Sprint 2 integration, the actual account-level free-tier quota was
+discovered to be **20 RPD** (requests per day) — far below the 1,500 RPD
+widely reported in third-party documentation as of April 2026.  At 20 RPD,
+the 15-query manual test suite (F-08 AC3) cannot be executed and iterated
+upon in the same day, and Sprint 5 evaluation (estimated 300+ queries across
+multiple prompt versions) would require 15+ calendar days on the free tier.
+
+**Alternatives evaluated**
+
+Option A — Dual-model strategy: use `gemini-3.1-flash-lite-preview` (500 RPD
+on free tier) for development and prompt iteration; switch to `gemini-2.5-flash`
+(20 RPD) for final validation only.
+- Pros: no cost; higher daily query budget for iteration
+- Cons: prompt portability risk (CoT instruction tuned on a weaker -Lite model
+  may not transfer to 2.5-flash without re-tuning); preview model instability
+  (behaviour can change mid-sprint); introduces a confounding variable in
+  Sprint 5 evaluation (accuracy differences could reflect model capability
+  rather than prompt quality); doubles validation workload
+
+Option B — Paid tier for `gemini-2.5-flash`: $0.30/M input tokens, $2.50/M
+output tokens, 10,000 RPD, 1,000 RPM, 1,000,000 TPM.
+- Pros: single model throughout (clean experiment design); 10,000 RPD eliminates
+  all quota constraints for development, testing, and evaluation; preserves
+  ADR-027 model selection with no code changes
+- Cons: introduces a cost dependency; requires billing account setup
+
+**Decision**
+Option B — paid tier with a **$5.00 monthly budget cap**.
+
+**Cost analysis**
+Estimated per-request input: ~3,500 tokens (schema ~2,600 + CoT instruction
+~660 + user question ~195).  Estimated per-request output: ~800 tokens.
+Total project query budget across Sprints 2–6: ~550 queries.
+
+Without implicit caching:
+  Input:  1.93M tokens × $0.30/M = $0.58
+  Output: 0.44M tokens × $2.50/M = $1.10
+  Total: ~$1.68
+
+With implicit caching (75% hit rate on schema prefix, verified as automatic
+on Gemini 2.5 Flash with 1,024-token minimum — schema exceeds this at ~2,600
+tokens; architecture already follows static-first prompt ordering per ADR-028):
+  Total: ~$1.35
+
+$5.00 cap provides 3× safety margin over worst-case uncached estimate.
+
+**Rationale**
+At $1.68 total estimated cost, the paid tier is cheaper than the engineering
+time required to manage the dual-model strategy (prompt portability testing,
+daily cross-validation spot-checks, confounding variable documentation).
+Single-model consistency preserves a clean before/after comparison for Sprint 5
+hypothesis testing (K26) and eliminates the risk of discovering prompt
+portability failures late in the project timeline.
+
+**Implicit caching note**
+Gemini implicit caching (announced May 2025) is enabled by default on all
+2.5+ models.  Requests sharing a common prefix are eligible for cache hits
+with a 75% token discount.  Minimum prefix for 2.5 Flash is 1,024 tokens.
+Our schema prefix (~2,600 tokens) qualifies.  The static-first prompt ordering
+already adopted in ADR-028 (schema → CoT instruction → user question) maximises
+cache hit probability.  On the free tier the benefit is reduced TTFT only; on
+the paid tier it also reduces cost.  Cache TTL is approximately 3–5 minutes,
+meaning back-to-back queries in a session stay warm but idle gaps cause eviction.
+No code changes are required — caching is automatic on Google's backend.
+
+**KSB mapping** K1, K13, S15, S25
+**Implementation**
+- Google Cloud billing: $5.00 monthly budget cap set in billing console
+- `src/llm.py` → `MODEL` constant unchanged (`gemini-2.5-flash`)
+- ADR-027 amended with cross-reference to this ADR
+
+---
 
 *End of decision log. Maintained incrementally — one ADR per decision, at point of decision.*
