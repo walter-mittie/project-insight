@@ -48,8 +48,7 @@ try:
     from google.genai import types as genai_types
 except ImportError as exc:
     raise ImportError(
-        "google-genai package not found. "
-        "Install with: pip install google-genai"
+        "google-genai package not found. Install with: pip install google-genai"
     ) from exc
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -62,7 +61,7 @@ except ImportError as exc:
 MODEL = "gemini-2.5-flash"
 
 # Path resolution: this file is src/llm.py — schema dict is ../docs/...
-BASE_DIR         = os.path.dirname(os.path.abspath(__file__))
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 SCHEMA_DICT_PATH = os.path.join(BASE_DIR, "..", "docs", "schema_data_dictionary.md")
 
 logger = logging.getLogger(__name__)
@@ -70,6 +69,7 @@ logger = logging.getLogger(__name__)
 # ──────────────────────────────────────────────────────────────────────────────
 # CUSTOM EXCEPTION
 # ──────────────────────────────────────────────────────────────────────────────
+
 
 class LLMError(Exception):
     """
@@ -84,6 +84,7 @@ class LLMError(Exception):
 # ──────────────────────────────────────────────────────────────────────────────
 # SCHEMA LOADER  (F-07)
 # ──────────────────────────────────────────────────────────────────────────────
+
 
 def load_schema_dict() -> str:
     """
@@ -118,8 +119,8 @@ def load_schema_dict() -> str:
 
     # Conservative token estimate: word_count × 1.3 (Gemini tokeniser averages
     # ~1.3 tokens/word for technical prose with code snippets).
-    word_count    = len(schema_text.split())
-    token_est     = int(word_count * 1.3)
+    word_count = len(schema_text.split())
+    token_est = int(word_count * 1.3)
     context_limit = 1_000_000  # Gemini 2.5 Flash context window
 
     logger.info(
@@ -144,6 +145,7 @@ def load_schema_dict() -> str:
 # ──────────────────────────────────────────────────────────────────────────────
 # GEMINI CLIENT  (F-06)
 # ──────────────────────────────────────────────────────────────────────────────
+
 
 def _get_client() -> genai.Client:
     """
@@ -207,8 +209,7 @@ def _parse_response_text(response) -> str:
         pass
 
     raise LLMError(
-        "Gemini returned an empty or unparseable response. "
-        f"Raw response: {response!r}"
+        f"Gemini returned an empty or unparseable response. Raw response: {response!r}"
     )
 
 
@@ -255,8 +256,6 @@ def get_llm_response(prompt: str, system_prompt: str) -> str:
                 f"Gemini rate limit exceeded (429). "
                 f"Wait before retrying. Original error: {msg}"
             ) from exc
-        raise LLMError(
-            f"Gemini API call failed: {msg}"
-        ) from exc
+        raise LLMError(f"Gemini API call failed: {msg}") from exc
 
     return _parse_response_text(response)
