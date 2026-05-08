@@ -248,9 +248,9 @@ def get_llm_response(prompt: str, system_prompt: str) -> str:
             ),
         )
         if hasattr(response, 'usage_metadata') and response.usage_metadata:
-        cached = getattr(response.usage_metadata, 'cached_content_token_count', 0)
-        if cached:
-            logger.info("Cache hit: %d tokens served from implicit cache", cached)
+            cached = getattr(response.usage_metadata, 'cached_content_token_count', 0)
+            if cached:
+                logger.info("Cache hit: %d tokens served from implicit cache", cached)
     except Exception as exc:
         # Map all SDK-level exceptions to LLMError.
         # Check for rate limit signal in the exception message.
