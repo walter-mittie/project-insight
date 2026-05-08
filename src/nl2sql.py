@@ -55,7 +55,7 @@ from src.llm import get_llm_response, load_schema_dict, LLMError
 logger = logging.getLogger(__name__)
 
 # ──────────────────────────────────────────────────────────────────────────────
-# CoT INSTRUCTION BLOCK  (prompt v1.0 — see docs/prompt_log.md)
+# CoT INSTRUCTION BLOCK  (prompt v1.1 — see docs/prompt_log.md)
 # ──────────────────────────────────────────────────────────────────────────────
 
 COT_INSTRUCTION = """
@@ -67,9 +67,28 @@ Work through the following steps IN ORDER. Do not skip steps.
 State which tables you need and which columns you will use.
 Reference only columns listed in the schema above.
 
-### Step 2 — Check semantic constraints
+### Step 2 — Check semantic constraints and KPI computation rules
 Review constraints C1–C6 in the schema. State which constraints apply to
 this query and how you will handle them (e.g., which flag filters to apply).
+
+Additionally, check for these critical rules:
+
+**Grain-locked columns — NEVER aggregate these directly:**
+fact_market contains pre-computed columns: market_share_volume_pct,
+market_share_value_pct, numeric_distribution_pct, price_index.
+These are valid ONLY for exact point lookups at the native grain
+(brand × sub_category × banner × week). NEVER SUM or AVG them across
+any dimension — the result is arithmetically incorrect. Instead, always
+recompute from the underlying numerator/denominator components using
+patterns P1–P4 in Section 5 of the schema.
+
+**Join pattern selection (when query involves both fact_sales and fact_market):**
+- If the question involves sub_category-level market data → use Pattern A
+  (join on week_date · brand · sub_category · banner — all four keys).
+- If the question is brand-level only → use Pattern B (pre-aggregate BOTH
+  fact_sales AND fact_market to brand × banner × week before joining).
+- NEVER join a 3-key sales_agg directly to the 4-key fact_market grain —
+  this produces a fan-out.
 
 ### Step 3 — Clarify any ambiguous terms
 If the question uses ambiguous FMCG terms (e.g., "revenue" could mean
@@ -86,8 +105,11 @@ SELECT ...
 Rules for the SQL block:
 - Use only tables and columns defined in the schema.
 - Apply flag exclusion patterns as specified in Section 7 of the schema.
-- For any query involving both fact_sales and fact_market, always aggregate
-  fact_sales to brand × banner × week first (constraint C3).
+- For KPI queries (market share, price index, distribution), always
+  recompute from numerator/denominator components using P1–P4 patterns.
+  Never SELECT the pre-computed grain-locked columns for aggregated queries.
+- For any query involving both fact_sales and fact_market, select Pattern A
+  or Pattern B as described in Step 2 above and Section 8 of the schema.
 - Use week_date for temporal filters — never assume a column called "date".
 - Time period interpretation: "last year" = year = 2025 (latest full year
   in the dataset); "this year" = 2025; "Q3" = quarter = 3.
