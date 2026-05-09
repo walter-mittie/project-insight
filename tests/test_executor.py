@@ -25,7 +25,7 @@ import sys
 import os
 
 # ── Ensure project root is on sys.path ────────────────────────────────────────
-_TESTS_DIR    = os.path.dirname(os.path.abspath(__file__))
+_TESTS_DIR = os.path.dirname(os.path.abspath(__file__))
 _PROJECT_ROOT = os.path.join(_TESTS_DIR, "..")
 sys.path.insert(0, os.path.abspath(_PROJECT_ROOT))
 
@@ -39,6 +39,7 @@ from src.executor import execute_sql
 # ──────────────────────────────────────────────────────────────────────────────
 # FIXTURES
 # ──────────────────────────────────────────────────────────────────────────────
+
 
 @pytest.fixture
 def conn():
@@ -66,6 +67,7 @@ def conn():
 # ──────────────────────────────────────────────────────────────────────────────
 # SUCCESS PATH
 # ──────────────────────────────────────────────────────────────────────────────
+
 
 def test_known_good_sql_returns_success(conn):
     """AC1 + AC3: known-good SQL returns status='success' with a DataFrame."""
@@ -106,6 +108,7 @@ def test_empty_result_is_success(conn):
 # EXECUTION TIME
 # ──────────────────────────────────────────────────────────────────────────────
 
+
 def test_exec_time_recorded(conn):
     """AC4: exec_time_ms present and non-negative on success path."""
     result = execute_sql(
@@ -121,6 +124,7 @@ def test_exec_time_recorded(conn):
 # ERROR PATHS  (AC2 + AC3)
 # ──────────────────────────────────────────────────────────────────────────────
 
+
 def test_nonexistent_column_returns_error(conn):
     """AC2 + AC3: SQL referencing a non-existent column returns error dict."""
     result = execute_sql(
@@ -132,7 +136,9 @@ def test_nonexistent_column_returns_error(conn):
     assert "error_message" in result
     # DuckDB raises BinderException or CatalogException for unknown columns
     assert result["error_type"] in (
-        "BinderException", "CatalogException", "duckdb.BinderException",
+        "BinderException",
+        "CatalogException",
+        "duckdb.BinderException",
         "duckdb.CatalogException",
     )
 
@@ -145,8 +151,10 @@ def test_nonexistent_table_returns_error(conn):
     )
     assert result["status"] == "error"
     assert result["error_type"] in (
-        "CatalogException", "duckdb.CatalogException",
-        "BinderException", "duckdb.BinderException",
+        "CatalogException",
+        "duckdb.CatalogException",
+        "BinderException",
+        "duckdb.BinderException",
     )
 
 
@@ -180,6 +188,7 @@ def test_no_exception_propagates(conn):
 # ──────────────────────────────────────────────────────────────────────────────
 # RETURN STRUCTURE COMPLETENESS
 # ──────────────────────────────────────────────────────────────────────────────
+
 
 def test_success_dict_has_all_keys(conn):
     """Success dict contains exactly the four required keys."""

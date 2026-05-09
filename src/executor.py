@@ -102,15 +102,15 @@ def execute_sql(sql: str, conn: duckdb.DuckDBPyConnection) -> dict:
         )
 
         return {
-            "status":       "success",
-            "data":         df,
-            "row_count":    row_count,
+            "status": "success",
+            "data": df,
+            "row_count": row_count,
             "exec_time_ms": exec_time_ms,
         }
 
     except Exception as exc:
         exec_time_ms = (time.perf_counter() - t_start) * 1000.0
-        error_type    = type(exc).__name__
+        error_type = type(exc).__name__
         error_message = str(exc)
 
         logger.warning(
@@ -120,7 +120,7 @@ def execute_sql(sql: str, conn: duckdb.DuckDBPyConnection) -> dict:
         )
 
         return {
-            "status":        "error",
-            "error_type":    error_type,
+            "status": "error",
+            "error_type": error_type,
             "error_message": error_message,
         }
