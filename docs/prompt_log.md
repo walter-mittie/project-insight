@@ -93,6 +93,132 @@ but return wrong business answers.
 
 ---
 
-*Log updated as prompt versions are iterated during Sprint 2 testing (AC4).*
-*Target: 15 manual test queries across single-table filter, aggregation,*
-*multi-table join, ambiguous term, and time-period filter categories (F-08 AC3).*
+## v1.1 — Empirical results (15-query manual test suite)
+
+**Date:** 2026-05-09 (test run) / 2026-05-10 (validation completed)
+
+**Test suite:** 15 queries across 5 categories (F-08 AC3):
+- Cat 1: Single-table filter (Q01–Q03)
+- Cat 2: Aggregation / KPI (Q04–Q06)
+- Cat 3: Multi-table join (Q07–Q09)
+- Cat 4: Ambiguous FMCG term (Q10–Q12)
+- Cat 5: Time-period filter (Q13–Q15)
+
+**Model:** gemini-2.5-flash | **Run timestamp:** 2026-05-09 16:53:29
+
+**Methodology:** Ground-truth SQL hand-written in DuckDB UI for all 15
+queries, independently of LLM output.  Ground truth validated for schema
+correctness against C1–C6, flag exclusion patterns (Section 7), and KPI
+patterns P1–P4.  LLM output then compared against validated ground truth
+per query.
+
+### Results summary
+
+| Verdict | Count | Queries |
+|---|---|---|
+| PASS | 10 | Q01, Q02, Q03, Q04, Q05, Q06, Q07, Q09, Q13, Q14 |
+| FAIL | 1 | Q11 (FP-03: silent correctness — brand shares sum to 102.41%) |
+| PARTIAL FAIL | 1 | Q08 (FP-02 + FP-03: no DISTINCT on dim_customer; over-broad is_volume_outlier) |
+| DIVERGE | 2 | Q10 (FP-02), Q15 (FP-04) |
+| N/A | 1 | Q12 (out-of-vocab entity "Tesco" — not in synthetic banner list; both GT and LLM return empty) |
+
+### Execution success rate
+
+15/15 queries (100%) produced parseable SQL that executed without error
+against DuckDB.  No delimiter extraction failures.  No ParserExceptions.
+
+### Failure patterns identified
+
+**FP-01 — RESOLVED by v1.1.**
+Q06 (P4 price index): Under v1.0 the model produced an incomplete SQL
+fragment — a bare expression without SELECT/FROM wrapper, causing a
+ParserException.  Under v1.1 the model produces a complete CTE-based query
+with proper P4 formula, DISTINCT fan-out prevention on the dim_product
+mapping, and correct flag filters.  Returns `price_index = 100.07` for
+Dairy 2025.  This is the primary success story of the v1.0 → v1.1 iteration.
+
+**FP-02 — Inconsistent application of `is_volume_outlier` to revenue queries.**
+The model applies `is_volume_outlier = FALSE` to revenue aggregations in
+Q08 and Q10 but does NOT apply it in Q02, Q04, Q07, Q14 — all of which are
+also revenue queries.  The inconsistency is non-deterministic: the same
+semantic context produces different filter decisions across queries.
+Root cause: the model sometimes activates a derivational rule ("net_revenue
+is derived from volume, so exclude outlier rows") that is not explicitly
+stated in Section 7 of the schema.  Non-determinism on this semantic question
+would confound Sprint 5 evaluation metrics.
+
+**FP-03 — Failure to DISTINCT-collapse a finer-grain dimension before joining.**
+Two manifestations:
+- Q08 (mild): `JOIN dim_customer ON fm.banner = dc.banner` without DISTINCT.
+  dim_customer has 18–28 rows per Grocery banner.  The join inflates fact_market
+  volumes by customer count.  The share ratio survives by cancellation but the
+  share is now customer-count-weighted across banners rather than a clean total.
+- Q11 (severe): `JOIN dim_product ON fm.brand = dp.brand AND fm.sub_category =
+  dp.sub_category` without DISTINCT in the BrandVolumeInBeverages CTE.  SKU-count
+  fan-out inflates the brand volume numerator while the denominator (separately
+  computed via SELECT DISTINCT) is correct.  Result: brand volume shares sum to
+  102.41% — mathematically impossible and a silent correctness failure.
+  Notably, the model correctly applies DISTINCT in the CorrectCategoryMarketVolume
+  CTE within the same query, demonstrating that it knows the rule but applies it
+  inconsistently.
+
+**FP-04 — ISO year vs calendar quarter boundary anomaly.**
+Q15: `week_date = 2024-12-30` has `year = 2025, quarter = 4, week_number = 1`
+due to the ISO/calendar year boundary mismatch in the data generator.  The
+model follows data labels strictly (defensible); ground truth applies a
+defensive `week_number > 1` filter to exclude the anomalous row.  Root cause
+is a data-design issue, not a prompt issue.  Documented in
+schema_data_dictionary.md v1.2 as a temporal column note.
+
+---
+
+## v1.2 — FP-02 / FP-03 fixes (Sprint 2 closure)
+
+**Date:** 2026-05-10
+
+**Change made:**
+COT_INSTRUCTION updated with two additions to Step 2 and one modification
+to Step 4, aligned with schema_data_dictionary.md v1.2.
+
+Step 2 addition — Dimension fan-out prevention rule:
+Explicit instruction that when joining a fact table to a dimension on a key
+set coarser than the dimension's grain, the dimension must be pre-aggregated
+to DISTINCT join columns before the join.  Two common cases documented:
+dim_customer on banner (multiple accounts per banner) and dim_product on
+(brand, sub_category) (multiple SKUs per pair).  Without DISTINCT,
+SUM/COUNT aggregations on the fact side are silently inflated by the
+dimension's row count per key.
+
+Step 4 modification — Flag exclusion adherence rule:
+Strengthened from "Apply flag exclusion patterns as specified in Section 7"
+to "Apply flag exclusion patterns EXACTLY as specified in Section 7 ...
+check Section 7 to determine which flags must be excluded ... do not add
+exclusions beyond what Section 7 specifies."  Explicit callout that
+`is_volume_outlier = TRUE` must be excluded from BOTH volume AND revenue
+aggregations per the updated Section 7.
+
+**Parallel schema change:**
+schema_data_dictionary.md updated to v1.2:
+- Section 7 flag table: `is_volume_outlier` exclusion scope extended to
+  include revenue KPIs (net_revenue_gbp, gross_revenue_gbp) with rationale
+  that revenue = volume × list_price and is therefore inflated on outlier rows.
+- Section 3: Temporal column note added documenting the ISO/calendar year
+  boundary quirk (FP-04).
+- See ADR-037 (schema enrichment rationale) and ADR-038 (DISTINCT rule).
+
+**Failure patterns that prompted the change:**
+- FP-02: `is_volume_outlier` applied inconsistently to revenue queries across
+  the 15-query test suite.  Schema enrichment (Section 7) makes the rule
+  explicit; the strengthened Step 4 instruction ensures strict adherence.
+- FP-03: DISTINCT pre-aggregation omitted when joining fact_market to
+  dim_customer (Q08) and dim_product (Q11), producing customer-count-weighted
+  shares and SKU-count-inflated volumes respectively.  The new Step 2 rule
+  makes DISTINCT pre-aggregation mandatory for all coarser-grain joins.
+
+**Location:** `src/nl2sql.py` → `COT_INSTRUCTION` constant
+
+---
+
+*Log updated at Sprint 2 closure. Prompt v1.2 frozen as the baseline for
+Sprint 5 evaluation (F-16, F-17). Next iteration (if needed) will be v1.3
+during Sprint 5 based on 20-query benchmark suite results.*
