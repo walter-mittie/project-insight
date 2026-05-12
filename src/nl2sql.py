@@ -55,7 +55,7 @@ from src.llm import get_llm_response, load_schema_dict, LLMError
 logger = logging.getLogger(__name__)
 
 # ──────────────────────────────────────────────────────────────────────────────
-# CoT INSTRUCTION BLOCK  (prompt v1.1 — see docs/prompt_log.md)
+# CoT INSTRUCTION BLOCK  (prompt v1.2 — see docs/prompt_log.md)
 # ──────────────────────────────────────────────────────────────────────────────
 
 COT_INSTRUCTION = """
@@ -90,6 +90,18 @@ patterns P1–P4 in Section 5 of the schema.
 - NEVER join a 3-key sales_agg directly to the 4-key fact_market grain —
   this produces a fan-out.
 
+**Dimension fan-out prevention (applies to ALL fact-to-dimension joins):**
+When joining a fact table to a dimension table on a key set that is coarser
+than the dimension's grain, always pre-aggregate the dimension to DISTINCT
+join columns BEFORE joining. Without this, SUM/COUNT aggregations on the
+fact side will be silently inflated by the dimension's row count per key.
+Common cases requiring DISTINCT:
+- Joining fact_market to dim_customer on banner: dim_customer has many
+  accounts per banner. Use: SELECT DISTINCT banner, channel FROM dim_customer.
+- Joining fact_market to dim_product on (brand, sub_category): dim_product
+  has many SKUs per (brand, sub_category) pair. Use: SELECT DISTINCT brand,
+  sub_category, category FROM dim_product.
+
 ### Step 3 — Clarify any ambiguous business terms
 If the question uses ambiguous FMCG terms, state your interpretation before
 writing SQL. Common ambiguities:
@@ -108,7 +120,11 @@ SELECT ...
 
 Rules for the SQL block:
 - Use only tables and columns defined in the schema.
-- Apply flag exclusion patterns as specified in Section 7 of the schema.
+- Apply flag exclusion patterns EXACTLY as specified in Section 7 of the
+  schema. For each KPI being computed, check Section 7 to determine which
+  flags must be excluded. Apply all listed exclusions; do not add exclusions
+  beyond what Section 7 specifies. In particular: is_volume_outlier = TRUE
+  must be excluded from BOTH volume AND revenue aggregations per Section 7.
 - For KPI queries (market share, price index, distribution), always
   recompute from numerator/denominator components using P1–P4 patterns.
   Never SELECT the pre-computed grain-locked columns for aggregated queries.
