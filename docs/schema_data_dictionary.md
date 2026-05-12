@@ -1,7 +1,7 @@
 ---
 feature: F-04
-version: 1.1
-last_updated: 2026-05-06
+version: 1.2
+last_updated: 2026-05-10
 source_layer: data/processed/
 tables: dim_product · dim_customer · fact_sales · fact_market
 ---
@@ -81,7 +81,17 @@ Date range: 104 ISO weeks, 2024-01-01 – 2025-12-29.
 | baseline_volume | INTEGER | Modelled baseline (non-promo underlying demand) |
 | incremental_volume | INTEGER | Promo-driven uplift above baseline. Zero for non-promoted rows |
 | is_zero_price | BOOLEAN | **QI-03 flag.** TRUE where `sku_net_price_gbp = 0`. Exclude from all revenue KPIs |
-| is_volume_outlier | BOOLEAN | **QI-04 flag.** TRUE where `volume_units` exceeds Tukey outer fence (Q3 + 3×IQR). Exclude from volume invariant checks and aggregations requiring clean decomposition |
+| is_volume_outlier | BOOLEAN | **QI-04 flag.** TRUE where `volume_units` exceeds Tukey outer fence (Q3 + 3×IQR). Exclude from volume aggregations requiring clean decomposition, baseline/incremental invariant checks, and all revenue KPIs (gross_revenue_gbp, net_revenue_gbp) — revenue is derived from `volume_units × list_price_gbp` and is inflated on outlier-flagged rows |
+
+**Temporal column note (ISO/calendar boundary):**
+`year` is derived from ISO week year; `quarter` and `month` are derived from
+the calendar date of `week_date`. At the ISO/calendar year boundary (typically
+the last Monday of December), a row may have `year = N+1` but `quarter = 4`
+and `month = 12`, because the ISO week year has advanced but the calendar date
+is still in December of year N. Example: `week_date = 2024-12-30` has
+`year = 2025, quarter = 4, month = 12, week_number = 1`. For precise
+calendar-period queries spanning year boundaries, filter on `week_date` ranges
+rather than relying on `year` + `quarter` combinations alone.
 
 ---
 
@@ -235,7 +245,7 @@ Do not use this invariant as a filter criterion — use `is_volume_outlier` inst
 | Flag | Value | Exclude From |
 |---|---|---|
 | is_zero_price | TRUE | All revenue KPIs: net_revenue_gbp, gross_revenue_gbp, sku_net_price_gbp aggregations |
-| is_volume_outlier | TRUE | Volume totals requiring clean decomposition; baseline/incremental invariant checks |
+| is_volume_outlier | TRUE | Volume totals requiring clean decomposition; baseline/incremental invariant checks; all revenue KPIs (net_revenue_gbp, gross_revenue_gbp) — revenue is derived from volume_units × list_price_gbp and is inflated on outlier-flagged rows |
 | is_zero_shelf_price | TRUE | price_index; implied retailer margin calculations |
 | is_vol_violation | TRUE | All KPI computations using brand_volume_units, brand_value_gbp, total_category_volume_units, total_category_value_gbp as components; also excludes the grain-locked pre-computed columns |
 
