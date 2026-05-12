@@ -1,6 +1,6 @@
 # Decision Log — Project Insight: Agentic Conversational BI
 **AM1 | BCS Level 7 AI Data Specialist | Manu Mohandas | TCS**
-Last updated: 2026-05-07
+Last updated: 2026-05-10
 
 ---
 
@@ -1187,6 +1187,151 @@ No code changes are required — caching is automatic on Google's backend.
 - Google Cloud billing: $5.00 monthly budget cap set in billing console
 - `src/llm.py` → `MODEL` constant unchanged (`gemini-2.5-flash`)
 - ADR-027 amended with cross-reference to this ADR
+
+---
+
+### ADR-037 — is_volume_outlier exclusion extended to revenue KPIs in schema flag table
+
+**Context**
+The 15-query manual test suite (F-08 AC3, run 2026-05-09) revealed that the
+LLM inconsistently applied `is_volume_outlier = FALSE` to revenue aggregations.
+In Q08 and Q10 the model excluded outlier rows from net_revenue_gbp calculations
+with the reasoning "net_revenue is derived from volume_units, so exclude for
+consistency"; in Q02, Q04, Q07, Q14 the model did NOT apply this filter for
+equivalent revenue queries.  This non-determinism produces different revenue
+totals across runs of semantically identical queries, which would confound the
+Sprint 5 baseline-vs-treatment evaluation metrics.
+
+The root cause was identified: schema_data_dictionary.md v1.1 Section 7 listed
+`is_volume_outlier` exclusion only for "volume totals requiring clean
+decomposition" — revenue was not mentioned.  The model's derivational reasoning
+("revenue derives from volume") is correct business logic but not codified in
+the schema, leading to inconsistent activation.
+
+**Decision**
+Extend `is_volume_outlier` exclusion scope in schema Section 7 to explicitly
+include revenue KPIs (net_revenue_gbp, gross_revenue_gbp).  The schema is the
+single source of truth; codifying the rule in the schema rather than the prompt
+makes it discoverable and deterministic.
+
+**Rationale**
+`gross_revenue_gbp = volume_units × list_price_gbp`.  On outlier-flagged rows,
+`volume_units` is inflated 5–10× above baseline (per QI-04 injection design),
+which directly inflates gross_revenue and, via `net_revenue = gross − discount`,
+net_revenue.  Excluding these rows from revenue aggregations is the correct
+business treatment.  Making this explicit in the schema eliminates the
+non-deterministic derivational reasoning observed in FP-02 and ensures the
+prompt instruction ("follow Section 7 exactly") produces consistent behaviour.
+
+**Alternatives considered**
+- Tighten prompt only ("apply only Section 7's listed exclusions"): rejected —
+  this would enforce the WRONG rule (excluding outlier rows from revenue is
+  correct business logic; a prompt-only fix would suppress it)
+- Accept-and-document divergence: rejected — non-determinism in revenue totals
+  is unacceptable for Sprint 5 evaluation; the baseline-vs-treatment comparison
+  requires stable, reproducible outputs
+
+**KSB mapping** K1, K5, S27, K23
+**Implementation**
+- `docs/schema_data_dictionary.md` v1.2 — Section 3 (`is_volume_outlier`
+  column definition) and Section 7 (flag exclusion table)
+- `src/nl2sql.py` v1.2 — Step 4 rule strengthened to "apply EXACTLY as
+  specified in Section 7"
+
+---
+
+### ADR-038 — Mandatory DISTINCT pre-aggregation when joining fact to finer-grain dimension
+
+**Context**
+The 15-query test suite revealed two instances where the LLM joined a fact
+table to a dimension on a key set coarser than the dimension's grain, causing
+silent aggregation inflation:
+
+Q08: `fact_market JOIN dim_customer ON banner` — dim_customer has 18–28 rows
+per Grocery banner.  Each fact_market row was replicated across all customer
+accounts in that banner.  `SUM(brand_volume_units)` was inflated by customer
+count.  The volume share ratio survived by cancellation (both numerator and
+denominator inflated equally), but intermediate volumes were wrong and the
+share was customer-count-weighted across banners.
+
+Q11: `fact_market JOIN dim_product ON (brand, sub_category)` — dim_product
+has multiple SKUs per (brand, sub_category) pair.  The brand volume numerator
+was inflated by SKU count.  The denominator was correctly computed via a
+separate `SELECT DISTINCT` CTE.  Result: brand shares summed to 102.41% — a
+mathematically impossible value indicating a silent correctness failure.
+
+The model demonstrated awareness of fan-out prevention in the same Q11 query
+(it applied DISTINCT correctly in the denominator CTE) but failed to apply it
+consistently in the numerator CTE.
+
+**Decision**
+Add an explicit "dimension fan-out prevention" rule to the CoT instruction
+(Step 2) requiring DISTINCT pre-aggregation whenever a fact table joins to a
+dimension on a coarser key set.  Two canonical cases documented: dim_customer
+on banner and dim_product on (brand, sub_category).
+
+**Rationale**
+Fan-out from dimension joins is a well-known SQL anti-pattern, but LLMs do not
+reliably detect it because the join syntax is valid and the query executes
+without error.  The failure is silent: aggregated values are numerically
+plausible in isolation (only the >100% sum in Q11 was a visible indicator).
+An explicit rule in the CoT instruction converts an implicit modelling judgment
+into a deterministic step the model must execute.
+
+**Alternatives considered**
+- Embed DISTINCT logic into the Pattern A/B templates only: rejected — the
+  fan-out occurs in contexts outside Pattern A/B (e.g. Q11 uses fact_market
+  only, not a fact_sales-to-fact_market cross-join; Q09/Q06 join fact_market
+  to dim_product for category filtering). The rule must be general.
+- Add DISTINCT to the schema Section 8 examples only: rejected — the examples
+  already use DISTINCT but the model doesn't generalise from examples to novel
+  contexts; an explicit rule is more reliable.
+
+**KSB mapping** K1, K3, S15, K23
+**Implementation**
+- `src/nl2sql.py` v1.2 — Step 2: "Dimension fan-out prevention" block added
+  after join pattern selection
+- `docs/prompt_log.md` — v1.2 entry documents the change and FP-03 root cause
+
+---
+
+### ADR-039 — ISO/calendar year boundary documented as known data quality observation
+
+**Context**
+Q15 in the 15-query test suite returned `week_date = 2024-12-30` in H2 2025
+results.  Investigation revealed that the row has `year = 2025` (ISO week year)
+but `quarter = 4, month = 12` (calendar-derived from the Monday date).  ISO
+week 1 of 2025 starts on Monday 2024-12-30 because the first Thursday of 2025
+is January 2.  The data generator uses ISO year for the `year` column and
+calendar date for `quarter` and `month`, creating a one-row mismatch at the
+year boundary.
+
+**Decision**
+Document the ISO/calendar boundary quirk in schema_data_dictionary.md v1.2 as
+a temporal column note in Section 3 (fact_sales).  No data regeneration.  No
+prompt change.
+
+**Rationale**
+The affected scope is one row per year boundary (ISO week 1 of 2025:
+week_date = 2024-12-30).  Re-generating data would invalidate all downstream
+artefacts (QI-injected layer, processed layer, EDA outputs, test results).
+The disruption far exceeds the benefit.  Documenting the quirk in the schema
+ensures the LLM has visibility if it encounters the boundary, and provides
+the assessor with evidence that the candidate identified and handled a
+real-world data quality pattern (ISO vs calendar year conventions are common
+in FMCG panel data from Nielsen/Kantar).
+
+**Alternatives considered**
+- Re-generate data with consistent year/quarter (both ISO or both calendar):
+  rejected — invalidates all downstream artefacts mid-build
+- Add prompt rule to handle year boundary: rejected — the LLM follows data
+  labels correctly; the issue is the label inconsistency, not the model's
+  behaviour
+
+**KSB mapping** K5, S9, S22
+**Implementation**
+- `docs/schema_data_dictionary.md` v1.2 — Section 3: temporal column note
+  with worked example
 
 ---
 
