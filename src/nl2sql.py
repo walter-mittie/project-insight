@@ -2,6 +2,7 @@
 src/nl2sql.py
 -------------
 F-08 · Chain-of-Thought NL2SQL Generation
+F-11 · Conversation History Management (Sprint 3)
 
 AM1: Agentic Conversational BI — Manu Mohandas / TCS
 
@@ -20,9 +21,14 @@ On extraction failure:
 
 Prompt architecture (F-08)
 --------------------------
-System prompt layout (order enforced):
-    [SCHEMA DICT]        — load_schema_dict() output, injected first
-    [TASK INSTRUCTION]   — CoT instruction block (see COT_INSTRUCTION below)
+System prompt layout (order enforced, static-first per ADR-028):
+    [SCHEMA DICT]            — load_schema_dict() output, injected first
+    [CONVERSATION HISTORY]   — <conversation_history> block (F-11, Sprint 3)
+    [TASK INSTRUCTION]       — CoT instruction block (see COT_INSTRUCTION below)
+
+The static-first ordering (schema before history before question) maximises
+Gemini implicit cache hit probability: the schema prefix is shared across all
+turns and qualifies for caching at ~2,600 tokens (ADR-028 / ADR-030).
 
 The CoT instruction block directs the model to:
     1. Identify which tables and columns are required before writing SQL
@@ -35,16 +41,29 @@ SQL extraction (F-08)
 Parsed between ```sql and ``` delimiters.  Leading/trailing whitespace
 stripped.  If delimiter not found → error dict returned (not raised).
 
-Conversation history (F-08 / Sprint 2 scope)
----------------------------------------------
-Accepted as a parameter for interface stability but not yet wired into
-the prompt in Sprint 2.  Sprint 3 will prepend the history as a
-<conversation_history> block in the system prompt.
+Conversation history format (F-11)
+-----------------------------------
+Each entry in conversation_history is a dict:
+    {
+        "turn_index":      int,   # 0-based turn counter
+        "user_question":   str,   # original user question for that turn
+        "sql":             str,   # SQL that was successfully executed
+        "result_summary":  str,   # compact text summary of the DataFrame result
+    }
+
+History is injected as a <conversation_history> XML-tagged block between the
+schema and the CoT instruction.  Oldest turns pruned first if history exceeds
+MAX_HISTORY_TURNS (F-11 AC3).  Truncation is logged at WARNING level.
+
+agent.py is responsible for building and maintaining the history list and
+passing it on each call.  nl2sql.py is responsible only for formatting it
+into the system prompt.
 
 Prompt iteration log
 --------------------
 All prompt changes must be recorded in docs/prompt_log.md with version
 number, change made, and failure pattern that prompted the change (F-08 AC4).
+v1.2 is the Sprint 5 evaluation baseline — CoT instruction frozen.
 """
 
 import re
@@ -53,6 +72,19 @@ import logging
 from src.llm import get_llm_response, load_schema_dict, LLMError
 
 logger = logging.getLogger(__name__)
+
+# ──────────────────────────────────────────────────────────────────────────────
+# CONVERSATION HISTORY CONFIG  (F-11)
+# ──────────────────────────────────────────────────────────────────────────────
+
+# Maximum number of prior turns to inject into the system prompt.
+# Oldest turns are pruned first when this limit is exceeded (F-11 AC3).
+# Rationale: 5 turns × ~500 tokens each = ~2,500 tokens history overhead.
+# Combined with schema (~2,600), CoT instruction (~660), and user question
+# (~195), total system prompt remains well under 10,000 tokens — a safe
+# margin against Gemini 2.5 Flash's 1M-token context window (ADR-027).
+MAX_HISTORY_TURNS = 5
+
 
 # ──────────────────────────────────────────────────────────────────────────────
 # CoT INSTRUCTION BLOCK  (prompt v1.2 — see docs/prompt_log.md)
@@ -141,6 +173,57 @@ Your reasoning (Steps 1–3) must appear BEFORE the ```sql block.
 The ```sql block is the only parseable output — keep it clean.
 """.strip()
 
+
+# ──────────────────────────────────────────────────────────────────────────────
+# CONVERSATION HISTORY FORMATTING  (F-11)
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+def _format_conversation_history(history: list[dict]) -> str:
+    """
+    Format conversation history as a <conversation_history> XML-tagged block
+    for injection into the Gemini system prompt.
+
+    Each turn renders as:
+        Turn N:
+          Question: <user_question>
+          SQL: <sql> (first 300 chars if long, with truncation note)
+          Result: <result_summary>
+
+    Parameters
+    ----------
+    history : list[dict]
+        Each dict has keys: turn_index, user_question, sql, result_summary.
+        Must already be truncated to MAX_HISTORY_TURNS by the caller.
+
+    Returns
+    -------
+    str
+        Formatted XML block, or empty string if history is empty.
+    """
+    if not history:
+        return ""
+
+    lines = ["<conversation_history>"]
+    for entry in history:
+        turn_num = entry.get("turn_index", 0) + 1  # 1-based for readability
+        question = entry.get("user_question", "").strip()
+        sql = entry.get("sql", "").strip()
+        result = entry.get("result_summary", "").strip()
+
+        # Truncate very long SQL to avoid context bloat while keeping
+        # enough structure for the model to understand the prior query pattern.
+        sql_display = sql if len(sql) <= 300 else sql[:297] + "..."
+
+        lines.append(f"\nTurn {turn_num}:")
+        lines.append(f"  Question: {question}")
+        lines.append(f"  SQL: {sql_display}")
+        lines.append(f"  Result: {result}")
+
+    lines.append("\n</conversation_history>")
+    return "\n".join(lines)
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # SQL EXTRACTION
 # ──────────────────────────────────────────────────────────────────────────────
@@ -188,7 +271,8 @@ def generate_sql(
 ) -> dict:
     """
     Generate a DuckDB SQL query from a natural language question using
-    chain-of-thought prompting with full schema injection.
+    chain-of-thought prompting with full schema injection and conversation
+    history context.
 
     Parameters
     ----------
@@ -196,11 +280,16 @@ def generate_sql(
         The analyst's natural language question (e.g. "What were the top 5
         brands by net revenue in Q3 2024?").
     conversation_history : list[dict]
-        Prior conversation turns in the format:
-            [{"role": "user", "content": str},
-             {"role": "assistant", "content": str}, ...]
-        Pass as empty list [] in Sprint 2 tests.
-        Sprint 3 will prepend this history into the system prompt.
+        Prior conversation turns. Each entry is a dict:
+            {
+                "turn_index":     int,   # 0-based turn counter
+                "user_question":  str,   # original question for that turn
+                "sql":            str,   # SQL executed successfully
+                "result_summary": str,   # compact DataFrame text summary
+            }
+        Pass as [] on the first turn. agent.py builds and maintains this list.
+        If len > MAX_HISTORY_TURNS (5), oldest turns are pruned here with a
+        WARNING log (F-11 AC3).
 
     Returns
     -------
@@ -218,31 +307,45 @@ def generate_sql(
             }
         On LLM API failure:
             {
-                "error": "llm_error",
+                "error":   "llm_error",
                 "message": str,
-                "raw":   ""
+                "raw":     ""
             }
 
     Notes
     -----
     - Does not raise on any path — all errors returned as structured dicts.
-    - conversation_history is accepted but not yet wired into the prompt
-      (Sprint 3 responsibility).
+    - System prompt order: schema → history → CoT instruction (ADR-028:
+      static-first ordering for implicit cache hit on the schema prefix).
     """
-    # ── Build system prompt ────────────────────────────────────────────────────
-    schema_text = load_schema_dict()
-    system_prompt = f"{schema_text}\n\n---\n\n{COT_INSTRUCTION}"
+    # ── History truncation (F-11 AC3) ─────────────────────────────────────────
+    if len(conversation_history) > MAX_HISTORY_TURNS:
+        dropped = len(conversation_history) - MAX_HISTORY_TURNS
+        conversation_history = conversation_history[-MAX_HISTORY_TURNS:]
+        logger.warning(
+            "generate_sql | conversation history truncated: %d oldest turn(s) "
+            "pruned to stay within MAX_HISTORY_TURNS=%d. "
+            "[F-11 AC3: oldest turns pruned first]",
+            dropped,
+            MAX_HISTORY_TURNS,
+        )
 
-    # ── Sprint 3 hook (conversation history) ──────────────────────────────────
-    # In Sprint 3, prepend conversation_history as a <conversation_history>
-    # block here before the CoT instruction.  For now, log if history is passed
-    # so we know the parameter flows through correctly.
-    if conversation_history:
-        logger.debug(
-            "conversation_history has %d turn(s) — not yet wired into prompt "
-            "(Sprint 3 responsibility).",
+    # ── Build system prompt (schema → history → CoT instruction) ──────────────
+    schema_text = load_schema_dict()
+    history_block = _format_conversation_history(conversation_history)
+
+    if history_block:
+        system_prompt = (
+            f"{schema_text}\n\n---\n\n{history_block}\n\n---\n\n{COT_INSTRUCTION}"
+        )
+        logger.info(
+            "generate_sql | %d prior turn(s) injected into system prompt",
             len(conversation_history),
         )
+    else:
+        # First turn — no history block, matches original Sprint 2 prompt shape.
+        system_prompt = f"{schema_text}\n\n---\n\n{COT_INSTRUCTION}"
+        logger.info("generate_sql | no conversation history (first turn)")
 
     # ── Call Gemini ────────────────────────────────────────────────────────────
     logger.info("generate_sql | question: %s", user_question[:120])
