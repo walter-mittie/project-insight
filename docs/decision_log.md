@@ -1190,6 +1190,65 @@ No code changes are required — caching is automatic on Google's backend.
 
 ---
 
+### ADR-031 — Self-correction retry loop: maximum retry count
+
+**Context**
+F-10 requires an agentic self-correction loop that feeds DuckDB execution errors
+back to the LLM so it can regenerate corrected SQL.  Before implementing the
+loop, the maximum number of retries required a decision: too few risks leaving
+correctable errors unresolved; too many wastes API quota and inflates p95
+latency metrics that Sprint 5 will measure.
+
+The Sprint 2 failure pattern register (FP-01 to FP-04) informed this decision:
+- FP-01 (incomplete SQL fragment) — resolved by prompt v1.1; not a runtime error
+- FP-02 (is_volume_outlier inconsistency) — resolved by schema v1.2 + prompt v1.2; not a runtime error
+- FP-03 (DISTINCT fan-out omission) — resolved by prompt v1.2 Step 2 rule; not a runtime error
+- FP-04 (ISO/calendar boundary) — schema documentation fix; not a runtime error
+
+None of the Sprint 2 FPs were DuckDB runtime errors.  The retry loop targets
+a different class of failure: executor.py-caught exceptions (CatalogException,
+ParserException, BinderException) caused by hallucinated column names, minor
+syntax variants, or ambiguous table references that the model can self-correct
+when shown the exact error message.
+
+**Decision**
+Maximum 2 retries → 3 total attempts (1 initial + 2 corrective).
+
+Implemented in `src/agent.py` as:
+    MAX_RETRIES = 2  # 3 total attempts (ADR-031)
+
+**Rationale**
+A single retry resolves the majority of correctable runtime errors: the model
+receives the exact DuckDB exception class name and message and can fix a
+hallucinated column name or minor syntax error in one pass.  A second retry
+handles the edge case where the first correction introduces a new error (e.g.
+fixing a column name reveals a missing join).  A third retry (4 total attempts)
+offers diminishing returns: if the model cannot fix a CatalogException in three
+attempts, the failure is categorical — the question references a concept not
+representable in the schema — and additional retries will not help.
+
+Cost impact on Sprint 5 evaluation: if 10% of 300 benchmark queries require one
+retry and 2% require two, total overhead is approximately 14% additional API calls
+(~42 extra calls).  At $0.30/M input tokens + $2.50/M output tokens this is
+approximately $0.06 above the baseline estimate — within the $5.00 monthly cap.
+The uncapped alternative would make Sprint 5 API cost unquantifiable, undermining
+the project's reproducibility.
+
+**Alternatives considered**
+- 1 retry (2 total attempts): rejected — insufficient for chained corrections
+  where fixing one error exposes another
+- 3 retries (4 total attempts): rejected — marginal benefit; increases p95
+  latency; makes Sprint 5 retry_rate metric harder to interpret cleanly
+- Unlimited with exponential backoff: rejected — no hard stop creates infinite
+  loop risk; incompatible with Sprint 5 benchmark reproducibility requirement
+
+**KSB mapping** K1, K5, S7, K26
+**Implementation**
+- `src/agent.py` — `MAX_RETRIES = 2`; retry loop in `run_turn()`
+- `src/agent.py` — `retry_count` exposed in all return dicts for JSONL logging
+
+---
+
 ### ADR-037 — is_volume_outlier exclusion extended to revenue KPIs in schema flag table
 
 **Context**
@@ -1332,6 +1391,62 @@ in FMCG panel data from Nielsen/Kantar).
 **Implementation**
 - `docs/schema_data_dictionary.md` v1.2 — Section 3: temporal column note
   with worked example
+
+---
+
+### ADR-040 — Orchestration layer: agent.py as single entry point
+
+**Context**
+Sprint 3 introduces three tightly coupled features: the self-correction retry
+loop (F-10), conversation history management (F-11), and narrative generation
+(F-12).  These features must be composed together — retry affects which SQL
+reaches narrative; history is appended only after a successful execution.
+A decision was required on where to locate this orchestration logic.
+
+Two options were considered:
+
+Option A — Embed orchestration in nl2sql.py: extend generate_sql() to call
+executor.py and handle retries internally.
+- Rejected: violates the Sprint 2 frozen interface (generate_sql signature
+  cannot change); conflates SQL generation with execution and narrative, making
+  the module responsible for three distinct concerns; makes unit-testing the
+  retry loop impossible without mocking the LLM.
+
+Option B — New src/agent.py module with a single public function run_turn():
+- Exposes: run_turn(user_question, conversation_history, conn) -> dict
+- Internally calls: generate_sql → execute_sql → [retry loop] → generate_narrative
+- Appends the completed turn to conversation_history before returning.
+- Sprint 4 (Streamlit UI) calls run_turn() as its single backend entry point.
+
+**Decision**
+Option B — new src/agent.py with run_turn() as the single public function.
+
+**Rationale**
+The agent.py boundary cleanly separates concerns: nl2sql.py generates SQL,
+executor.py runs it, narrative.py interprets results, agent.py orchestrates
+the loop.  This mapping is one-to-one with the F-10/F-11/F-12 feature
+boundaries, making each module independently testable.  The retry loop in
+agent.py can be unit-tested by mocking execute_sql() to return deliberate
+CatalogException errors without any LLM API calls.  Sprint 4 benefits from
+a single, stable entry point: the Streamlit UI has no visibility of retry
+logic, history truncation, or narrative prompting — it calls run_turn() and
+receives a unified response dict.  The architecture also enforces the ADR-002
+principle of FK coupling at the right layer: NL2SQL and execution are coupled
+to each other via agent.py, not to narrative generation.
+
+**Alternatives considered**
+- Embed in nl2sql.py: rejected — breaks frozen Sprint 2 interface; violates
+  single responsibility principle; complicates unit testing
+- Embed in narrative.py: rejected — misleading name for a god-module; narrative
+  is a post-execution concern and should not own execution logic
+- No orchestration module (wire everything in Streamlit): rejected — moves
+  business logic into the UI layer; makes Sprint 5 evaluation harder to isolate
+
+**KSB mapping** K1, K5, S7, S15, K26
+**Implementation**
+- `src/agent.py` — run_turn(user_question, conversation_history, conn) -> dict
+- `src/narrative.py` — generate_narrative(user_question, df) -> dict (called by agent.py)
+- Sprint 4: Streamlit calls agent.run_turn() exclusively
 
 ---
 
