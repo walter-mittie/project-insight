@@ -219,6 +219,158 @@ schema_data_dictionary.md updated to v1.2:
 
 ---
 
-*Log updated at Sprint 2 closure. Prompt v1.2 frozen as the baseline for
-Sprint 5 evaluation (F-16, F-17). Next iteration (if needed) will be v1.3
-during Sprint 5 based on 20-query benchmark suite results.*
+## Sprint 3 live validation — additional failure patterns (NL2SQL)
+
+The following failure patterns were identified during the Sprint 3 live
+validation (sprint_3_validation_report.md, 2026-05-13).  They do NOT trigger
+a prompt version change in Sprint 3 — the v1.2 baseline remains frozen for
+Sprint 5 evaluation.  They are documented here for Sprint 5 iteration.
+
+**FP-05 — Incorrect promotional uplift formula.**
+N3 query: "What was the average volume uplift for promoted SKUs compared to
+non-promoted SKUs in 2024?"
+Generated SQL: `AVG(incremental_volume)` — this is an absolute average of
+incremental units per transaction row, not a meaningful uplift ratio.
+Correct formula: `SUM(incremental_volume) / SUM(baseline_volume) * 100`.
+Additionally, `is_zero_price = FALSE` was applied to a volume-focused query
+— an unnecessary filter that the schema (Section 7) does not mandate for
+this KPI.
+Root cause: schema_data_dictionary.md defines `incremental_volume` and
+`baseline_volume` as stored columns but does not specify the standard
+formula for "promotional uplift %" as a named KPI.  The model defaults to
+`AVG(incremental_volume)` in the absence of explicit formula guidance.
+Fix required: add a dedicated KPI definition for `promotional_uplift_pct`
+in Section 5 of the schema (alongside P1–P4), with the formula and an
+explicit note that this is a ratio, not an average of raw units.
+
+**FP-06 — Category revenue denominator ambiguous for multi-category brands.**
+N5 query: "Compare the top 5 brands by net revenue in 2025, showing each
+brand's total and percentage share of category revenue."
+Generated SQL: `relevant_category_revenue` CTE groups by `brand`, making
+each brand's denominator the sum of all categories it operates in.  If two
+top-5 brands share a category, each includes the full category revenue in
+its own denominator — the percentages are not comparable and do not sum to
+100%.  The model also omitted the `category` column from the output, making
+the shares uninterpretable.
+Root cause: "percentage share of category revenue" is underspecified when
+brands span multiple categories.  The schema has no guidance on how to
+handle cross-category brand portfolios in share-of-category metrics.
+Fix required: add a schema note (Section 5 or Section 8) clarifying that
+"share of category revenue" is only well-defined within a single category,
+and that queries involving multi-category brands should either (a) restrict
+to a named category, or (b) use total portfolio revenue as the denominator
+with explicit labelling.
+
+*Log updated at Sprint 3 closure. Prompt v1.2 remains frozen as the Sprint 5
+evaluation baseline. FP-05 and FP-06 are candidates for a v1.3 iteration
+during Sprint 5 if the 20-query benchmark confirms these failure modes at
+meaningful rates.*
+
+
+
+# Narrative Prompt Log
+**AM1: Agentic Conversational BI | F-12 | Manu Mohandas / TCS**
+
+---
+
+## Purpose
+
+This section logs every change to the narrative generation system prompt in
+`src/narrative.py → NARRATIVE_SYSTEM_PROMPT`.  The narrative prompt is a
+separate component from the NL2SQL CoT prompt above — it drives the second
+Gemini call that converts a query result DataFrame into a plain-English
+paragraph for non-technical FMCG users.
+
+Format mirrors the NL2SQL section: one entry per version.
+
+---
+
+## Narrative v1.0 — Initial prompt (Sprint 3)
+
+**Date:** 2026-05-11
+
+**Change made:**
+Initial narrative system prompt authored.  Core rules:
+- 2 to 4 sentences, no bullet points
+- Reference specific figures (brand names, values, percentages, dates)
+- No question repetition verbatim
+- No hedging language ("it appears", "it seems")
+- No SQL or technical terms in output
+- 0-row results: explain no data found, do not fabricate
+- Use £ for GBP, % for percentages
+
+**Failure pattern that prompted the change:**
+N/A — initial version.  Prompt designed pre-emptively based on known
+tendencies of LLMs producing narrative text: over-hedging, omitting specific
+figures, and reproducing the question verbatim as the first sentence.
+
+**Location:** `src/narrative.py` → `NARRATIVE_SYSTEM_PROMPT` constant
+**MAX_SUMMARY_ROWS at this version:** 10
+
+---
+
+## Narrative v1.1 — Synthesis rules + directional language (Sprint 3 closure)
+
+**Date:** 2026-05-13
+
+**Change made:**
+Three additions to the prompt prompted by Sprint 3 live validation findings
+(sprint_3_validation_report.md):
+
+1. **Synthesise-not-enumerate rule:** for results with more than 3 rows,
+   the model must not list every row individually.  It must identify the
+   single most important finding, then characterise the overall pattern in
+   a single phrase.  Good/bad examples included inline.
+2. **Result-shape guidance:** specific instructions for four result types:
+   - Trend data (time series): describe direction + magnitude + inflection
+   - Rankings: lead with winner + gap to second, then characterise the field
+   - Comparisons: identify the standout finding (biggest gap, outlier,
+     reversal of expectation)
+   - Cross-segment: highlight the most commercially significant difference
+3. **Directional language rules:** when all values in the key metric are
+   negative, the top-ranked item must be described as "the smallest decline"
+   or "the least negative change" — never "the strongest growth".  When
+   values are a mix of positive and negative, direction must be explicit
+   for each item.
+
+**Additionally:** `MAX_SUMMARY_ROWS` increased from 10 to 50 (not a prompt
+change, but a co-located configuration change applied at the same time).
+
+**Failure patterns that prompted the change:**
+
+*FP-N01 — Negative-metric language (T3):*
+T3 multi-turn query returned YoY revenue growth rates for three brands:
+Velvet Dairy −1.29%, CocoaEthos −2.00%, BerryBliss −2.51%.  The v1.0
+narrative described Velvet Dairy as having "the strongest revenue growth
+from 2024 to 2025" — incorrect because all three brands declined.  The
+correct description is "the smallest decline".  The model correctly reported
+the figure (−1.29%) but chose inappropriate framing language.
+Fix: directional language rule added (item 3 above).
+
+*FP-N02 — Row enumeration for long tables:*
+Multiple v1.0 narratives (T4 channel breakdown, N4 sub-category prices,
+N5 multi-brand comparison) listed rows mechanically one by one rather than
+synthesising a business insight.  For N4 (22 sub-categories), the result
+was a run-on sentence enumerating eight sub-categories with no interpretive
+value beyond reading the table aloud.
+Fix: synthesise-not-enumerate rule and result-shape guidance added (items
+1 and 2 above).
+
+*FP-N03 — Truncated narrative for long trend tables (T5):*
+T5 asked for weekly volume trend for Velvet Dairy in H2 2025 (26 rows).
+MAX_SUMMARY_ROWS = 10 sent only the first 10 weeks to the narrative model,
+producing an incomplete narrative that covered weeks 27–36 only and could
+not comment on the remainder of H2.  The narrative noted it was working
+from "truncated data", which is not acceptable output for a business user.
+Fix: MAX_SUMMARY_ROWS increased from 10 to 50.  At 50 rows, the full H2
+weekly trend (26 rows) and any other expected FMCG result shape is covered.
+The 50-row limit remains trivial against Gemini 2.5 Flash's 1M token window.
+
+**Location:** `src/narrative.py` → `NARRATIVE_SYSTEM_PROMPT` constant
+**MAX_SUMMARY_ROWS at this version:** 50
+
+---
+
+*Narrative prompt v1.1 is the baseline entering Sprint 4 (Streamlit UI).
+Next iteration (if needed) will be v1.2 during Sprint 5 based on 20-query
+benchmark narrative quality assessment.*

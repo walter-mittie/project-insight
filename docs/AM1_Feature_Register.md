@@ -222,7 +222,7 @@ Generated SQL must be executed against DuckDB and results returned as structured
 |---|---|
 | **Sprint** | S3 |
 | **KSB** | K1 · K13 · K23 · S15 |
-| **Status** | `Planned` |
+| **Status** | `Validated` |
 
 **Problem Statement**
 LLM-generated SQL will sometimes fail execution due to schema mismatches or hallucinated column names. An agentic retry loop that feeds the error back to the model creates a self-healing system without requiring human intervention.
@@ -240,7 +240,7 @@ LLM-generated SQL will sometimes fail execution due to schema mismatches or hall
 |---|---|
 | **Sprint** | S3 |
 | **KSB** | K1 · K5 · S15 |
-| **Status** | `Planned` |
+| **Status** | `Validated` |
 
 **Problem Statement**
 Contextual follow-up questions (e.g. "now filter that by the North region") require the model to retain prior turns. Without history, every query is independent and analytical context is lost between turns.
@@ -258,7 +258,7 @@ Contextual follow-up questions (e.g. "now filter that by the North region") requ
 |---|---|
 | **Sprint** | S3 |
 | **KSB** | K28 · S4 · S5 · B6 |
-| **Status** | `Planned` |
+| **Status** | `Validated` |
 
 **Problem Statement**
 Non-technical FMCG users need answers in plain English, not raw tabular output. A dedicated second LLM call generates a business-language explanation of the result, serving the non-technical audience explicitly.
@@ -436,7 +436,7 @@ The AM1 report and presentation require specific evidence artefacts. Capturing t
 |---|---|---|
 | S1 — Foundation: Data & Environment (Apr 16–20) | F-01 · F-02 · F-03 · F-04 · F-05 | F-01 ✅ · F-02 ✅ · F-03 ✅ · F-04 ✅ · F-05 ✅ |
 | S2 — NL2SQL Core (Apr 21–27) | F-06 · F-07 · F-08 · F-09 | F-06 ✅ · F-07 ✅ · F-08 ✅ · F-09 ✅ · Prompt v1.2 frozen |
-| S3 — Agentic Loop + Conversation History (Apr 28–May 4) | F-10 · F-11 · F-12 | 📋 Planned |
+| S3 — Agentic Loop + Conversation History (May 11–16) | F-10 · F-11 · F-12 | F-10 ✅ · F-11 ✅ · F-12 ✅ |
 | S4 — Streamlit UI + JSONL Logging (May 5–11) | F-13 · F-14 · F-15 | 📋 Planned |
 | S5 — Evaluation + Hypothesis Testing (May 12–18) | F-16 · F-17 · F-18 | 📋 Planned |
 | S6 — Hardening + Evidence Capture (May 19–22) | F-19 · F-20 | 📋 Planned |
@@ -446,5 +446,23 @@ The AM1 report and presentation require specific evidence artefacts. Capturing t
 FP-01 (P4 fragment) resolved by v1.1. FP-02 (is_volume_outlier inconsistency) and FP-03 (DISTINCT fan-out)
 fixed in v1.2 via schema enrichment (ADR-037) + prompt update (ADR-038). FP-04 (ISO/calendar boundary)
 documented in schema v1.2 (ADR-039). Prompt v1.2 frozen as Sprint 5 evaluation baseline.
+
+**Sprint 3 closure notes (2026-05-13):**
+F-10 (retry loop): 10/10 unit tests passing. Live wiring check confirmed
+retry_count=0 and turn_index present in live response dict. Hard cap
+MAX_RETRIES=2 (3 total attempts) enforced per ADR-031.
+F-11 (conversation history): 11/11 unit tests passing. 5-turn multi-turn
+contextual test passed — model correctly resolved "those brands" / "that brand"
+references across turns using injected <conversation_history> block.
+History copy-on-entry pattern prevents caller list mutation.
+F-12 (narrative generation): 13/13 unit tests passing. 5 query types tested
+live (volume trend, market share, promotional uplift, price analysis,
+multi-brand comparison). AC2 manual review: 4/5 narratives cited specific
+figures. One failure (N3: incorrect SQL formula for promotional uplift,
+logged as FP-05 in prompt_log.md — SQL generation issue, not narrative issue).
+Narrative prompt updated v1.0→v1.1 (synthesise-not-enumerate, directional
+language rules, MAX_SUMMARY_ROWS 10→50). Additional SQL generation failure
+patterns FP-05 and FP-06 logged for Sprint 5 prompt iteration.
+turn_index is 0-based internally; Sprint 4 Streamlit will display turn_index+1.
 
 ✅ Validated · 🔨 Building · 🧪 Testing · 📋 Planned
