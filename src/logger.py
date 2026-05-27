@@ -3,7 +3,7 @@ src/logger.py
 -------------
 F-15 · JSONL Logging Infrastructure
 
-AM1: Agentic Conversational BI — Manu Mohandas / TCS
+Project Insight: Agentic Conversational BI 
 
 Public interface
 ----------------
@@ -51,6 +51,7 @@ class LogWriteError(Exception):
 def log_turn(
     result: dict,
     session_id: str,
+    rendered_chart_type: str = "auto",
     resumed: bool = False,
     resumed_at: Optional[str] = None,
 ) -> bool:
@@ -63,6 +64,9 @@ def log_turn(
         Return dict from run_turn().  Handles both success and error shapes.
     session_id : str
         Session UUID from st.session_state.session_id.
+    rendered_chart_type : str
+        The chart type actually shown to the user after the full priority
+        chain resolved (ADR-042). Set by app.py. Defaults to "auto".
     resumed : bool
         True for turns logged during session restoration (State 2 → State 3).
     resumed_at : str | None
@@ -96,6 +100,10 @@ def log_turn(
             else False,
             "history_truncated": result.get("history_truncated", False),
             "error_stage": result.get("error_stage") if not is_success else None,
+            "suggested_chart_type": result.get(
+                "suggested_chart_type", "auto"
+            ),  # ADR-042
+            "rendered_chart_type": rendered_chart_type,  # ADR-042
             "resumed": resumed,
             "resumed_at": resumed_at if resumed else None,
         }
@@ -127,7 +135,7 @@ def load_past_sessions(log_path: str = LOG_PATH) -> list[dict]:
     Each item:
         {
             "id":      session_id str,
-            "date":    "15 May 2025",
+            "date":    "02 February 2026",
             "preview": first user_query str (up to 120 chars),
             "q_count": total non-resumed turn count,
         }
@@ -232,13 +240,13 @@ def _ensure_log_dir(path: str) -> None:
 
 
 def _utc_now() -> str:
-    """Return current UTC time as ISO-8601 string (e.g. '2025-05-15T09:14:00Z')."""
+    """Return current UTC time as ISO-8601 string (e.g. '2026-02-02T09:09:00Z')."""
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def _format_log_date(raw_ts: str) -> str:
     """
-    Convert '2025-05-15T09:14:00Z' → '15 May 2025'.
+    Convert '2026-02-02T09:09:00Z' → '02 February 2026'.
     Returns raw_ts unchanged if parsing fails.
     """
     try:

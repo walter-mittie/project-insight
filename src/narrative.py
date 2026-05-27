@@ -3,7 +3,7 @@ src/narrative.py
 ----------------
 F-12 · Narrative Response Generation
 
-AM1: Agentic Conversational BI — Manu Mohandas / TCS
+Project Insight: Agentic Conversational BI 
 
 Provides the public function:
 

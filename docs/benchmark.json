@@ -1,0 +1,202 @@
+[
+  {
+    "id": "Q01",
+    "tier": 1,
+    "category": "single-table-filter",
+    "question": "How many distinct SKUs were sold in Q1 2024?",
+    "ground_truth_sql": "SELECT COUNT(DISTINCT product_id) AS distinct_skus_sold\nFROM fact_sales\nWHERE year = 2024\n  AND quarter = 1;",
+    "fp_history": [],
+    "multi_turn": false,
+    "t1_question": null
+  },
+  {
+    "id": "Q02",
+    "tier": 1,
+    "category": "single-table-filter",
+    "question": "What are the top 10 SKUs by net revenue in 2025 for active products only?",
+    "ground_truth_sql": "SELECT\n  dp.product_id,\n  dp.sku_name,\n  SUM(fs.net_revenue_gbp) AS net_revenue\nFROM fact_sales AS fs\nJOIN dim_product AS dp ON fs.product_id = dp.product_id\nWHERE dp.is_active = TRUE\n  AND fs.is_zero_price = FALSE\n  AND fs.year = 2025\nGROUP BY dp.product_id, dp.sku_name\nORDER BY net_revenue DESC\nLIMIT 10;",
+    "fp_history": [],
+    "multi_turn": false,
+    "t1_question": null
+  },
+  {
+    "id": "Q03",
+    "tier": 1,
+    "category": "single-table-filter",
+    "question": "What was the total incremental volume from promotional activity in 2024?",
+    "ground_truth_sql": "SELECT\n  SUM(incremental_volume) AS total_2024_incremental_vol\nFROM fact_sales\nWHERE year = 2024\n  AND is_volume_outlier = FALSE;",
+    "fp_history": [],
+    "multi_turn": false,
+    "t1_question": null
+  },
+  {
+    "id": "Q04",
+    "tier": 2,
+    "category": "aggregation-kpi",
+    "question": "What was total gross revenue and total trade discount by channel in 2025?",
+    "ground_truth_sql": "SELECT\n  dc.channel,\n  SUM(fs.gross_revenue_gbp) AS total_gross_revenue_gbp,\n  SUM(fs.trade_discount_gbp) AS total_trade_discount_gbp\nFROM fact_sales AS fs\nJOIN dim_customer AS dc USING (customer_id)\nWHERE fs.year = 2025\n  AND fs.is_zero_price = FALSE\nGROUP BY dc.channel\nORDER BY dc.channel;",
+    "fp_history": [],
+    "multi_turn": false,
+    "t1_question": null
+  },
+  {
+    "id": "Q05",
+    "tier": 2,
+    "category": "aggregation-kpi",
+    "question": "What was NitroBoost's volume market share in 2024 by quarter?",
+    "ground_truth_sql": "SELECT\n  quarter,\n  SUM(brand_volume_units) AS brand_volume,\n  SUM(total_category_volume_units) AS category_volume,\n  ROUND(100.0 * SUM(brand_volume_units) / NULLIF(SUM(total_category_volume_units), 0), 2) AS vol_market_share_pct\nFROM fact_market\nWHERE year = 2024\n  AND is_vol_violation = FALSE\n  AND brand = 'NitroBoost'\nGROUP BY quarter\nORDER BY quarter;",
+    "fp_history": [],
+    "multi_turn": false,
+    "t1_question": null
+  },
+  {
+    "id": "Q06",
+    "tier": 2,
+    "category": "aggregation-kpi",
+    "question": "What was the price index for the Dairy category across all banners in 2025?",
+    "ground_truth_sql": "SELECT\n  ROUND(\n    (SUM(fm.brand_value_gbp) / NULLIF(SUM(fm.brand_volume_units), 0))\n    / (SUM(fm.total_category_value_gbp) / NULLIF(SUM(fm.total_category_volume_units), 0))\n    * 100, 2\n  ) AS price_index\nFROM fact_market AS fm\nJOIN (\n  SELECT DISTINCT sub_category, category\n  FROM dim_product\n) AS dp USING (sub_category)\nWHERE fm.year = 2025\n  AND fm.is_zero_shelf_price = FALSE\n  AND fm.is_vol_violation = FALSE\n  AND dp.category = 'Dairy';",
+    "fp_history": [],
+    "multi_turn": false,
+    "t1_question": null
+  },
+  {
+    "id": "Q07",
+    "tier": 3,
+    "category": "multi-table-join",
+    "question": "What was net revenue by region and category in Q4 2025?",
+    "ground_truth_sql": "SELECT\n  dc.region,\n  dp.category,\n  SUM(fs.net_revenue_gbp) AS total_net_revenue_gbp\nFROM fact_sales AS fs\nJOIN dim_product AS dp USING (product_id)\nJOIN dim_customer AS dc USING (customer_id)\nWHERE fs.year = 2025\n  AND fs.quarter = 4\n  AND fs.is_zero_price = FALSE\nGROUP BY dc.region, dp.category\nORDER BY dc.region, dp.category;",
+    "fp_history": [],
+    "multi_turn": false,
+    "t1_question": null
+  },
+  {
+    "id": "Q08",
+    "tier": 3,
+    "category": "multi-table-join",
+    "question": "For the Grocery channel, what was net revenue and volume market share by brand in 2025?",
+    "ground_truth_sql": "WITH sales_agg AS (\n  SELECT\n    fs.week_date,\n    dp.brand,\n    dc.banner,\n    SUM(fs.net_revenue_gbp) AS net_revenue\n  FROM fact_sales AS fs\n  JOIN dim_product AS dp USING (product_id)\n  JOIN dim_customer AS dc USING (customer_id)\n  WHERE fs.year = 2025\n    AND fs.is_zero_price = FALSE\n    AND dc.channel = 'Grocery'\n  GROUP BY fs.week_date, dp.brand, dc.banner\n),\nmarket_agg AS (\n  SELECT\n    fm.week_date,\n    fm.brand,\n    fm.banner,\n    SUM(fm.brand_volume_units) AS brand_volume,\n    SUM(fm.total_category_volume_units) AS category_volume\n  FROM fact_market AS fm\n  JOIN (\n    SELECT DISTINCT banner, channel\n    FROM dim_customer\n  ) AS dc USING (banner)\n  WHERE fm.year = 2025\n    AND fm.is_vol_violation = FALSE\n    AND dc.channel = 'Grocery'\n  GROUP BY fm.week_date, fm.brand, fm.banner\n)\nSELECT\n  brand,\n  SUM(net_revenue) AS net_revenue_gbp,\n  ROUND(100.0 * SUM(brand_volume) / NULLIF(SUM(category_volume), 0), 2) AS volume_market_share_pct\nFROM sales_agg AS sa\nJOIN market_agg AS ma USING (week_date, brand, banner)\nGROUP BY brand\nORDER BY net_revenue_gbp DESC;",
+    "fp_history": ["FP-02", "FP-03"],
+    "multi_turn": false,
+    "t1_question": null
+  },
+  {
+    "id": "Q09",
+    "tier": 3,
+    "category": "multi-table-join",
+    "question": "What was numeric distribution for the Snacks category by banner in 2024?",
+    "ground_truth_sql": "SELECT\n  fm.banner,\n  ROUND(\n    100.0 * SUM(fm.numeric_distribution_outlets)\n    / NULLIF(SUM(fm.total_outlets_in_banner), 0), 2\n  ) AS numeric_distribution_pct\nFROM fact_market AS fm\nJOIN (\n  SELECT DISTINCT sub_category, category\n  FROM dim_product\n) AS dp USING (sub_category)\nWHERE fm.year = 2024\n  AND dp.category = 'Snacks'\nGROUP BY fm.banner\nORDER BY fm.banner;",
+    "fp_history": [],
+    "multi_turn": false,
+    "t1_question": null
+  },
+  {
+    "id": "Q10",
+    "tier": 4,
+    "category": "ambiguous-term",
+    "question": "What was total revenue by brand in 2024?",
+    "ground_truth_sql": "SELECT\n  dp.brand,\n  SUM(fs.net_revenue_gbp) AS total_net_revenue_gbp\nFROM fact_sales AS fs\nJOIN dim_product AS dp USING (product_id)\nWHERE fs.year = 2024\n  AND fs.is_zero_price = FALSE\nGROUP BY dp.brand\nORDER BY total_net_revenue_gbp DESC;",
+    "fp_history": ["FP-02"],
+    "multi_turn": false,
+    "t1_question": null
+  },
+  {
+    "id": "Q11",
+    "tier": 4,
+    "category": "ambiguous-term",
+    "question": "What is the market share of the top 3 brands in the Beverages category?",
+    "ground_truth_sql": "WITH top_3_bev_brands AS (\n  SELECT\n    dp.sub_category,\n    dp.brand,\n    SUM(fs.net_revenue_gbp) AS brand_revenue\n  FROM fact_sales AS fs\n  JOIN (\n    SELECT product_id, brand, sub_category\n    FROM dim_product\n    WHERE category = 'Beverages'\n  ) AS dp USING (product_id)\n  WHERE fs.is_zero_price = FALSE\n  GROUP BY dp.brand, dp.sub_category\n  ORDER BY brand_revenue DESC\n  LIMIT 3\n)\nSELECT\n  fm.brand,\n  ROUND(100.0 * SUM(fm.brand_volume_units) / NULLIF(SUM(fm.total_category_volume_units), 0), 2) AS volume_market_share_pct\nFROM fact_market AS fm\nJOIN top_3_bev_brands USING (brand, sub_category)\nWHERE fm.is_vol_violation = FALSE\nGROUP BY fm.brand\nORDER BY volume_market_share_pct DESC;",
+    "fp_history": ["FP-03"],
+    "multi_turn": false,
+    "t1_question": null
+  },
+  {
+    "id": "Q12",
+    "tier": 4,
+    "category": "ambiguous-term",
+    "question": "What is the average shelf price of Dairy products in Hartfield's in 2025?",
+    "ground_truth_sql": "SELECT\n  ROUND(\n    SUM(fm.brand_value_gbp) / NULLIF(SUM(fm.brand_volume_units), 0),\n    2\n  ) AS avg_shelf_price_gbp\nFROM fact_market AS fm\nJOIN (\n  SELECT DISTINCT brand, sub_category, category\n  FROM dim_product\n  WHERE category = 'Dairy'\n) AS dp USING (brand, sub_category)\nWHERE fm.banner = 'Hartfield''s'\n  AND fm.year = 2025\n  AND fm.is_zero_shelf_price = FALSE\n  AND fm.is_vol_violation = FALSE;",
+    "fp_history": [],
+    "multi_turn": false,
+    "t1_question": null
+  },
+  {
+    "id": "Q13",
+    "tier": 5,
+    "category": "time-period-filter",
+    "question": "Compare total net revenue and volume units by category between 2024 and 2025.",
+    "ground_truth_sql": "SELECT\n  dp.category,\n  fs.year,\n  SUM(CASE WHEN fs.is_volume_outlier = FALSE THEN fs.volume_units ELSE 0 END) AS total_volume_units,\n  ROUND(SUM(CASE WHEN fs.is_zero_price = FALSE THEN fs.net_revenue_gbp ELSE 0 END), 2) AS total_net_revenue_gbp\nFROM fact_sales AS fs\nJOIN dim_product AS dp USING (product_id)\nWHERE fs.year IN (2024, 2025)\nGROUP BY dp.category, fs.year\nORDER BY dp.category, fs.year;",
+    "fp_history": [],
+    "multi_turn": false,
+    "t1_question": null
+  },
+  {
+    "id": "Q14",
+    "tier": 5,
+    "category": "time-period-filter",
+    "question": "What was total net revenue by channel in January 2025?",
+    "ground_truth_sql": "SELECT\n  dc.channel,\n  SUM(fs.net_revenue_gbp) AS total_net_revenue_gbp\nFROM fact_sales AS fs\nJOIN dim_customer AS dc USING (customer_id)\nWHERE fs.is_zero_price = FALSE\n  AND fs.year = 2025\n  AND fs.month = 1\nGROUP BY dc.channel\nORDER BY total_net_revenue_gbp DESC;",
+    "fp_history": [],
+    "multi_turn": false,
+    "t1_question": null
+  },
+  {
+    "id": "Q15",
+    "tier": 5,
+    "category": "time-period-filter",
+    "question": "What was the weekly trend of volume units for the Confectionery category in H2 2025?",
+    "ground_truth_sql": "SELECT\n  fs.week_date,\n  SUM(fs.volume_units) AS total_volume_units\nFROM fact_sales AS fs\nJOIN dim_product AS dp USING (product_id)\nWHERE dp.category = 'Confectionery'\n  AND fs.is_volume_outlier = FALSE\n  AND fs.year = 2025\n  AND fs.quarter IN (3, 4)\n  AND fs.week_number > 1\nGROUP BY fs.week_date\nORDER BY fs.week_date;",
+    "fp_history": ["FP-04"],
+    "multi_turn": false,
+    "t1_question": null
+  },
+  {
+    "id": "Q16",
+    "tier": 2,
+    "category": "aggregation-kpi",
+    "question": "What is the total net revenue by brand for 2025, excluding weeks flagged as volume outliers?",
+    "ground_truth_sql": "SELECT\n  dp.brand,\n  SUM(fs.net_revenue_gbp) AS total_net_revenue_gbp\nFROM fact_sales AS fs\nJOIN dim_product AS dp ON fs.product_id = dp.product_id\nWHERE fs.year = 2025\n  AND fs.is_zero_price = FALSE\n  AND fs.is_volume_outlier = FALSE\nGROUP BY dp.brand\nORDER BY total_net_revenue_gbp DESC;",
+    "fp_history": ["FP-02"],
+    "multi_turn": false,
+    "t1_question": null
+  },
+  {
+    "id": "Q17",
+    "tier": 3,
+    "category": "multi-table-join",
+    "question": "What is BerryBliss's volume market share in the Sugar Sweets sub-category, aggregated across all banners combined, in H1 2025?",
+    "ground_truth_sql": "SELECT\n  ROUND(\n    SUM(fm.brand_volume_units) * 100.0\n    / NULLIF(SUM(fm.total_category_volume_units), 0),\n    2\n  ) AS volume_market_share_pct\nFROM fact_market AS fm\nWHERE fm.brand = 'BerryBliss'\n  AND fm.sub_category = 'Sugar Sweets'\n  AND fm.year = 2025\n  AND fm.quarter IN (1, 2)\n  AND fm.is_vol_violation = FALSE;",
+    "fp_history": [],
+    "multi_turn": false,
+    "t1_question": null
+  },
+  {
+    "id": "Q18",
+    "tier": 3,
+    "category": "multi-table-join",
+    "question": "Compare the average weekly net revenue for CocoaEthos during Q2 2025 versus Q4 2025. Which quarter was stronger and by how much?",
+    "ground_truth_sql": "WITH quarterly AS (\n  SELECT\n    fs.quarter,\n    SUM(fs.net_revenue_gbp) AS total_net_revenue_gbp,\n    COUNT(DISTINCT fs.week_date) AS week_count,\n    SUM(fs.net_revenue_gbp) / NULLIF(COUNT(DISTINCT fs.week_date), 0) AS avg_weekly_net_revenue_gbp\n  FROM fact_sales AS fs\n  JOIN dim_product AS dp ON fs.product_id = dp.product_id\n  WHERE dp.brand = 'CocoaEthos'\n    AND fs.year = 2025\n    AND fs.quarter IN (2, 4)\n    AND fs.is_zero_price = FALSE\n    AND fs.is_volume_outlier = FALSE\n  GROUP BY fs.quarter\n)\nSELECT\n  quarter,\n  week_count,\n  ROUND(total_net_revenue_gbp, 2) AS total_net_revenue_gbp,\n  ROUND(avg_weekly_net_revenue_gbp, 2) AS avg_weekly_net_revenue_gbp\nFROM quarterly\nORDER BY quarter;",
+    "fp_history": [],
+    "multi_turn": false,
+    "t1_question": null
+  },
+  {
+    "id": "Q19",
+    "tier": 4,
+    "category": "ambiguous-term",
+    "question": "Which brands in the Confectionery category declined by more than 2% in net revenue from 2024 to 2025? Show the decline rate for each.",
+    "ground_truth_sql": "WITH brand_rev AS (\n  SELECT\n    dp.brand,\n    SUM(CASE WHEN fs.year = 2024 THEN fs.net_revenue_gbp ELSE 0 END) AS rev_2024,\n    SUM(CASE WHEN fs.year = 2025 THEN fs.net_revenue_gbp ELSE 0 END) AS rev_2025\n  FROM fact_sales AS fs\n  JOIN dim_product AS dp ON fs.product_id = dp.product_id\n  WHERE dp.category = 'Confectionery'\n    AND fs.year IN (2024, 2025)\n    AND fs.is_zero_price = FALSE\n    AND fs.is_volume_outlier = FALSE\n  GROUP BY dp.brand\n)\nSELECT\n  brand,\n  ROUND(rev_2024, 2) AS net_revenue_2024_gbp,\n  ROUND(rev_2025, 2) AS net_revenue_2025_gbp,\n  ROUND((rev_2025 - rev_2024) / NULLIF(rev_2024, 0) * 100, 2) AS growth_rate_pct\nFROM brand_rev\nWHERE rev_2024 > 0\n  AND (rev_2025 - rev_2024) / NULLIF(rev_2024, 0) * 100 < -2\nORDER BY growth_rate_pct ASC;",
+    "fp_history": [],
+    "multi_turn": false,
+    "t1_question": null
+  },
+  {
+    "id": "Q20",
+    "tier": 5,
+    "category": "multi-turn",
+    "question": "For those 3 brands, compare their net revenue in Q3 2024 vs Q3 2025.",
+    "ground_truth_sql": "SELECT\n  dp.brand,\n  fs.year,\n  SUM(fs.net_revenue_gbp) AS total_net_revenue_gbp\nFROM fact_sales AS fs\nJOIN dim_product AS dp ON fs.product_id = dp.product_id\nWHERE dp.brand IN ('CocoaEthos', 'BerryBliss', 'Velvet Dairy')\n  AND fs.quarter = 3\n  AND fs.year IN (2024, 2025)\n  AND fs.is_zero_price = FALSE\n  AND fs.is_volume_outlier = FALSE\nGROUP BY dp.brand, fs.year\nORDER BY dp.brand, fs.year;",
+    "fp_history": [],
+    "multi_turn": true,
+    "t1_question": "What were the top 3 brands by net revenue in Q3 2025?"
+  }
+]

@@ -3,7 +3,7 @@ tests/test_narrative.py
 -----------------------
 F-12 · Narrative Response Generation — Unit Tests
 
-AM1: Agentic Conversational BI — Manu Mohandas / TCS
+Project Insight: Agentic Conversational BI 
 
 All Gemini API calls are mocked.  Tests verify the narrative module in
 isolation: correct prompt construction, DataFrame summarisation, return

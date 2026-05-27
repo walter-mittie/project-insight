@@ -1,7 +1,9 @@
 """
 src/db.py
 ---------
-DuckDB connection module — AM1 Agentic Conversational BI prototype.
+DuckDB connection module
+
+Project Insight: Agentic Conversational BI 
 
 Design
 ------

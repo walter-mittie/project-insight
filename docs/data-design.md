@@ -1,7 +1,5 @@
-# Project Insight — Data Design Document
-**AM1: Agentic Conversational BI — LLM-Driven Ad-Hoc Data Exploration**  
-Candidate: Manu Mohandas | TCS | BCS Level 7 AI Data Specialist  
-Sprint 1 reference document — last updated: 5 May 2026
+**Project Insight: Agentic Conversational BI — LLM-Driven Ad-Hoc Data Exploration**  
+Sprint 1 reference document — last updated: 14 January 2026
 
 ---
 

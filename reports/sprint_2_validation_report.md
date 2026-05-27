@@ -1,8 +1,9 @@
 # Sprint 2 Validation Report
-## F-08 · Chain-of-Thought NL2SQL Generation — 15-Query Manual Test Suite
+## Project Insight : Agentic Conversational BI
+### F-08 · Chain-of-Thought NL2SQL Generation — 15-Query Manual Test Suite
 
-**Candidate:** Manu Mohandas | **Employer:** TCS
-**Sprint:** S2 — NL2SQL Core | **Date:** 2026-05-09 (test run) / 2026-05-10 (validation)
+**Sprint:** 2
+**Date:** 2026-01-16 (test run) / 2026-01-17 (validation)
 **Model:** gemini-2.5-flash | **Prompt version tested:** v1.1
 **Prompt version issued at closure:** v1.2
 
@@ -179,15 +180,15 @@ schema_data_dictionary.md v1.2 (ADR-039).
 
 The Sprint 2 prompt evolved through three versions:
 
-**v1.0 (2026-05-07):** Initial CoT instruction.  Pre-emptive design based on
+**v1.0 (2026-01-12):** Initial CoT instruction.  Pre-emptive design based on
 known NL2SQL failure modes.  Addressed flag filter omission, revenue ambiguity,
 and C3 join pattern.
 
-**v1.1 (2026-05-08):** Aligned with schema v1.1.  Added grain-locked column
+**v1.1 (2026-01-15):** Aligned with schema v1.1.  Added grain-locked column
 warning, P1–P4 recomputation instruction, and Pattern A/B selection criteria.
 Directly resolved FP-01 (Q06 P4 fragment failure → complete CTE-based SQL).
 
-**v1.2 (2026-05-10):** Aligned with schema v1.2.  Added DISTINCT fan-out
+**v1.2 (2026-01-16):** Aligned with schema v1.2.  Added DISTINCT fan-out
 prevention rule (FP-03 fix) and strengthened Section 7 adherence instruction
 (FP-02 fix).  Frozen as Sprint 5 evaluation baseline.
 
@@ -205,7 +206,7 @@ All four Sprint 2 features (F-06, F-07, F-08, F-09) are Validated.  The
 
 **Evidence artefacts produced:**
 - `tests/15_prompts.py` — test runner script
-- `15_prompts_llm_output.md` — LLM output (v1.1 run, 2026-05-09)
+- `15_prompts_llm_output.md` — LLM output (v1.1 run, 2026-01-16)
 - `15_prompt_manual_sql_validation.md` — hand-written ground-truth SQL
 - `docs/sprint_2_validation_report.md` — this document
 - `docs/prompt_log.md` — v1.0 / v1.1 / v1.2 entries with FP register

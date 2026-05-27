@@ -3,7 +3,7 @@ tests/sprint3_validation.py
 ---------------------------
 Sprint 3 End-to-End Validation — Live Pipeline Runner
 
-AM1: Agentic Conversational BI — Manu Mohandas / TCS
+Project Insight: Agentic Conversational BI 
 
 This script exercises the full agentic pipeline (agent.run_turn → Gemini API
 → DuckDB) against the real processed Parquet dataset.  It is the live

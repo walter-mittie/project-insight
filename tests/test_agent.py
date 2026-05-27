@@ -4,7 +4,7 @@ tests/test_agent.py
 F-10 · Self-Correction Agentic Retry Loop — Unit Tests
 F-11 · Conversation History Management — Unit Tests
 
-AM1: Agentic Conversational BI — Manu Mohandas / TCS
+Project Insight: Agentic Conversational BI 
 
 All Gemini API calls, DuckDB execution, and narrative generation are mocked.
 Tests are runnable in CI with no .env file, no Parquet files, and no network.

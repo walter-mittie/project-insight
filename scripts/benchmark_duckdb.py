@@ -197,7 +197,7 @@ def main() -> int:
     print()
     print("╔══════════════════════════════════════════════════════════════════╗")
     print("║  benchmark_duckdb.py — F-03 Acceptance Benchmark               ║")
-    print("║  AM1: Agentic Conversational BI — Manu Mohandas / TCS          ║")
+    print("║  Project Insight: Agentic Conversational BI           ║")
     print("╚══════════════════════════════════════════════════════════════════╝")
     print()
 

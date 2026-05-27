@@ -5,7 +5,7 @@ F-13 · Streamlit Conversational UI
 F-14 · Dual-Audience Output Design
 F-15 · JSONL Logging Infrastructure (via src/logger.py)
 
-AM1: Agentic Conversational BI — Manu Mohandas / TCS
+Project Insight: Agentic Conversational BI 
 
 Sprint 4 Streamlit UI for Project Insight: Conversational BI.
 Entry point: `streamlit run app.py`
@@ -15,18 +15,18 @@ Design decisions
 - Calls run_turn() exclusively — no direct dependency on nl2sql, executor, or narrative.
 - DuckDB connection opened once per session and stored in session_state (critical).
 - Chart type inferred by frontend heuristic (ADR-041, Option A) — no backend involvement.
-- Dual-audience: business users see narrative + chart/table; technical reviewers access
-  SQL, latency, and retry count via collapsible expander only.
+- Dual-audience: business users see narrative + chart/table; technical reviewers access SQL, latency, and retry count via collapsible expander only.
 - Session resumption: three-state model (pending → running → complete) matching mockup spec.
 """
 
 import logging
 import uuid
 import streamlit as st
-import streamlit.components.v1 as components
 import pandas as pd
 import plotly.graph_objects as go
+import plotly.express as px
 from datetime import datetime
+import calendar
 
 from src.agent import run_turn
 from src.db import get_connection
@@ -76,10 +76,33 @@ C = {
     "bar_colors": ["#0e7c86", "#2ca58d", "#5bbfb0", "#38a3a5"],
 }
 
-CHART_KEYWORDS = {
+# ── Chart type constants (ADR-042 — Option B priority chain) ─────────────────
+# Keyword → chart type mapping (Priority 1: explicit user intent)
+PROMPT_KEYWORDS = {
+    "pie": [
+        "share",
+        "mix",
+        "split",
+        "proportion",
+        "composition",
+        "breakdown",
+        "% of",
+        "percent of",
+        "pie chart",
+        "donut",
+    ],
+    "scatter": [
+        "vs ",
+        "versus",
+        "scatter",
+        "correlation",
+        "against",
+        "price vs",
+        "spend vs",
+        "margin vs",
+        "bubble",
+    ],
     "line": [
-        "line chart",
-        "line graph",
         "trend",
         "over time",
         "weekly",
@@ -88,15 +111,46 @@ CHART_KEYWORDS = {
         "daily",
         "by week",
         "by month",
+        "by quarter",
+        "line chart",
+        "line graph",
     ],
-    "bar": ["bar chart", "bar graph", "column chart", "compare", "comparison"],
-    "table": ["table", "list", "show me", "breakdown", "detail"],
+    "bar": [
+        "bar chart",
+        "bar graph",
+        "column chart",
+        "ranking",
+        "compare",
+        "comparison",
+    ],
+    "table": ["table", "list", "show me all", "breakdown", "detail"],
+}
+
+# Colour palette — cycles for bars; used by pie and scatter too
+BAR_COLORS = [
+    "#0e7c86",
+    "#2ca58d",
+    "#5bbfb0",
+    "#38a3a5",
+    "#2dd4bf",
+    "#0d9488",
+    "#14b8a6",
+    "#5eead4",
+]
+
+# Human-readable labels for each chart type (used in radio toggle)
+CHART_LABELS = {
+    "bar": "Bar chart",
+    "line": "Line chart",
+    "pie": "Pie chart",
+    "scatter": "Scatter plot",
+    "table": "Table",
 }
 
 EXAMPLE_PROMPTS = [
-    "2025 quarterly revenue growth of top 5 brands as a line chart",
-    "Which retailers drove the most promotional volume uplift in April?",
-    "Top 10 SKUs by gross margin contribution — last 12 weeks",
+    "Top 10 SKUs by net revenue in 2025 as a bar chart",
+    "2025 quarterly revenue trend of top 5 brands as a line chart",
+    "Revenue mix by category in 2025 as a pie chart",
 ]
 
 
@@ -110,6 +164,8 @@ def _new_session_id() -> str:
 
 
 def _init_session_state() -> None:
+    if "llm_mode" not in st.session_state:
+            st.session_state.llm_mode = "cloud"
     if "turns" not in st.session_state:
         st.session_state.turns = []  # result dicts for display
     if "history" not in st.session_state:
@@ -132,6 +188,8 @@ def _init_session_state() -> None:
         st.session_state.view_prefs = {}  # {turn_index: "chart"|"table"}
     if "warning_dismissed" not in st.session_state:
         st.session_state.warning_dismissed = False
+    if "pending_question" not in st.session_state:
+        st.session_state.pending_question = None  # question submitted, awaiting run_turn()
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -142,338 +200,798 @@ def _init_session_state() -> None:
 def _inject_global_css() -> None:
     st.markdown(
         """
-<style>
-@import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600&family=DM+Mono:wght@400;500&family=Lora:ital,wght@0,400;1,400&display=swap');
+    <style>
+    @import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600&family=DM+Mono:wght@400;500&family=Lora:ital,wght@0,400;1,400&display=swap');
 
-/* ── Page background ── */
-.stApp, [data-testid="stAppViewContainer"] {
-    background: #f0f4f6 !important;
-}
+    /* ── Page background ── */
+    .stApp, [data-testid="stAppViewContainer"] {
+        background: #f0f4f6 !important;
+    }
 
-/* ── Dark sticky header ── */
-header[data-testid="stHeader"] {
-    background: #1a2332 !important;
-    box-shadow: 0 2px 12px rgba(0,0,0,0.18);
-}
+    /* ── Native header: dark background only ── */
+    header[data-testid="stHeader"] {
+        background: #1a2332 !important;
+        box-shadow: 0 2px 12px rgba(0,0,0,0.18) !important;
+    }
 
-/* ── Sidebar styling ── */
-[data-testid="stSidebar"] {
-    background: white !important;
-    border-right: 1px solid #e8edf2;
-}
-[data-testid="stSidebar"] .stMarkdown p {
-    font-family: 'DM Sans', sans-serif;
-    font-size: 0.88rem;
-}
+    /* ── Hide decoration line only — toggle buttons handled below ── */
+    [data-testid="stDecoration"] {
+        display: none !important;
+    }
 
-/* ── Main thread container ── */
-.main .block-container {
-    max-width: 860px !important;
-    padding-top: 1.5rem !important;
-    padding-bottom: 140px !important;
-}
+    /* ── Make ALL native header icons/buttons white on dark background ── */
+    /* Cast wide net across Streamlit's varying button data-testids */
+    header[data-testid="stHeader"] button,
+    header[data-testid="stHeader"] a {
+        color: white !important;
+        opacity: 1 !important;
+    }
+    header[data-testid="stHeader"] button svg,
+    header[data-testid="stHeader"] button svg path,
+    header[data-testid="stHeader"] button svg rect,
+    header[data-testid="stHeader"] button svg line,
+    header[data-testid="stHeader"] button svg circle,
+    header[data-testid="stHeader"] button svg polyline,
+    header[data-testid="stHeader"] button svg polygon {
+        fill: white !important;
+        stroke: white !important;
+        color: white !important;
+    }
 
-/* ── Global font ── */
-html, body, [class*="css"] {
-    font-family: 'DM Sans', sans-serif !important;
-}
+    /* ── Main content: Streamlit manages offset with visible native header ── */
+    .main .block-container {
+        max-width: 860px !important;
+        padding-top: 1.5rem !important;
+        padding-bottom: 90px !important;
+    }
 
-/* ── Radio button: chart/table toggle styling ── */
-div[data-testid="stRadio"] > label {
-    font-family: 'DM Mono', monospace !important;
-    font-size: 0.78rem !important;
-    color: #7a8fa6 !important;
-    display: none; /* hide the "No label" */
-}
-div[data-testid="stRadio"] > div {
-    background: #f0f4f6;
-    border: 1px solid #e8edf2;
-    border-radius: 7px;
-    padding: 3px;
-    display: inline-flex;
-    gap: 2px;
-}
-div[data-testid="stRadio"] > div > label {
-    padding: 4px 14px !important;
-    border-radius: 5px !important;
-    font-family: 'DM Sans', sans-serif !important;
-    font-size: 0.75rem !important;
-    cursor: pointer !important;
-}
+    /* ── Sidebar ── */
+    [data-testid="stSidebar"] {
+        background: white !important;
+        border-right: 1px solid #e8edf2 !important;
+    }
+    [data-testid="stSidebar"] .stMarkdown p {
+        font-family: 'DM Sans', sans-serif;
+        font-size: 0.88rem;
+    }
+    /* ══ Sidebar toggle buttons ══════════════════════════════════════════════════
+    Confirmed via DevTools inspection (Streamlit 1.4x):
 
-/* ── Plotly chart: remove default margin ── */
-[data-testid="stPlotlyChart"] {
-    margin-bottom: 0 !important;
-}
+    OPEN (expand) button in header when sidebar is collapsed:
+        data-testid="stExpandSidebarButton"  kind="headerNoPadding"
+        Icon is a Material icon text node (keyboard_double_arrow_right),
+        NOT an SVG — so fill/stroke rules are irrelevant; target color + span.
 
-/* ── Dataframe: DM Mono numerics ── */
-[data-testid="stDataFrame"] td {
-    font-family: 'DM Mono', monospace !important;
-    font-size: 0.8rem !important;
-}
-[data-testid="stDataFrame"] th {
-    font-family: 'DM Sans', sans-serif !important;
-    font-size: 0.72rem !important;
-    text-transform: uppercase !important;
-    letter-spacing: 0.05em !important;
-    color: #7a8fa6 !important;
-    background: #f7fafa !important;
-}
+    CLOSE (collapse) button inside the open sidebar:
+        data-testid="stSidebarCollapseButton"
+        Same Material icon pattern.
 
-/* ── Expander: SQL panel styling ── */
-details[data-testid="stExpander"] {
-    border: 1px solid #e8edf2 !important;
-    border-radius: 0 0 8px 8px !important;
-    border-top: none !important;
-    background: white !important;
-}
-details[data-testid="stExpander"] summary {
-    font-family: 'DM Mono', monospace !important;
-    font-size: 0.78rem !important;
-    color: #7a8fa6 !important;
-    letter-spacing: 0.04em !important;
-    padding: 0.6rem 1.2rem !important;
-    background: white !important;
-}
-details[data-testid="stExpander"] summary:hover {
-    background: #f7fafa !important;
-}
+    Also hide Deploy button and main menu (three-dot) from header.
+    ═══════════════════════════════════════════════════════════════════════════ */
 
-/* ── Code block: dark background ── */
-[data-testid="stCode"] {
-    background: #1a2332 !important;
-}
-[data-testid="stCode"] code {
-    font-family: 'DM Mono', monospace !important;
-    font-size: 0.78rem !important;
-    color: #a8d8dc !important;
-    line-height: 1.7 !important;
-}
+    /* Expand button: white on dark header */
+    button[data-testid="stExpandSidebarButton"],
+    button[data-testid="stExpandSidebarButton"] span,
+    button[data-testid="stExpandSidebarButton"] span[data-testid="stIconMaterial"] {
+        color: white !important;
+        opacity: 1 !important;
+    }
 
-/* ── st.chat_input styling ── */
-[data-testid="stChatInput"] {
-    border-color: #d1dce6 !important;
-    border-radius: 10px !important;
-    font-family: 'DM Sans', sans-serif !important;
-    font-size: 0.925rem !important;
-}
-[data-testid="stChatInput"]:focus-within {
-    border-color: #0e7c86 !important;
-}
+    /* Collapse button: dark on white sidebar */
+    button[data-testid="stSidebarCollapseButton"],
+    button[data-testid="stSidebarCollapseButton"] span,
+    button[data-testid="stSidebarCollapseButton"] span[data-testid="stIconMaterial"] {
+        color: #1a2332 !important;
+        opacity: 1 !important;
+    }
 
-/* ── st.warning / st.error / st.info banners ── */
-[data-testid="stAlert"][data-baseweb="notification"][kind="warning"] {
-    background: #fffbeb !important;
-    border: 1px solid #fcd34d !important;
-    color: #92400e !important;
-    font-family: 'DM Sans', sans-serif !important;
-    font-size: 0.82rem !important;
-}
+    /* Hide Deploy button and main menu (three-dot) */
+    button[data-testid="stBaseButton-header"],
+    button[data-testid="stMainMenuButton"],
+    [data-testid="stAppDeployButton"],
+    [data-testid="stMainMenu"] {
+        display: none !important;
+    }
 
-/* ── Chat input bottom bar ── */
-[data-testid="stBottom"] {
-    background: white !important;
-    border-top: 1px solid #e8edf2 !important;
-    box-shadow: 0 -4px 20px rgba(0,0,0,0.07) !important;
-}
+    /* ── Global font ── */
+    html, body, [class*="css"] {
+        font-family: 'DM Sans', sans-serif !important;
+    }
 
-/* ── Hide Streamlit default menu/footer ── */
-#MainMenu, footer { visibility: hidden; }
-</style>
-""",
+    /* ── Radio button: chart/table toggle styling ── */
+    div[data-testid="stRadio"] > label {
+        font-family: 'DM Mono', monospace !important;
+        font-size: 0.78rem !important;
+        color: #7a8fa6 !important;
+        display: none; /* hide the "No label" */
+    }
+    div[data-testid="stRadio"] > div {
+        background: #f0f4f6;
+        border: 1px solid #e8edf2;
+        border-radius: 7px;
+        padding: 3px;
+        display: inline-flex;
+        gap: 2px;
+    }
+    div[data-testid="stRadio"] > div > label {
+        padding: 4px 14px !important;
+        border-radius: 5px !important;
+        font-family: 'DM Sans', sans-serif !important;
+        font-size: 0.75rem !important;
+        cursor: pointer !important;
+        color: #7a8fa6 !important;          /* unselected label colour */
+    }
+    div[data-testid="stRadio"] > div > label[data-checked="true"],
+    div[data-testid="stRadio"] > div > label:has(input:checked) {
+        background: white !important;
+        color: #0e7c86 !important;          /* selected label colour */
+        box-shadow: 0 1px 2px rgba(0,0,0,0.06);
+    }
+    /* Hide the actual radio dot — keep only the pill labels */
+    div[data-testid="stRadio"] > div > label > div:first-child {
+        display: none !important;
+    }
+
+    /* ── Plotly chart: remove default margin ── */
+    [data-testid="stPlotlyChart"] {
+        margin-bottom: 0 !important;
+    }
+
+    /* ── Dataframe: DM Mono numerics ── */
+    [data-testid="stDataFrame"] td {
+        font-family: 'DM Mono', monospace !important;
+        font-size: 0.8rem !important;
+    }
+    [data-testid="stDataFrame"] th {
+        font-family: 'DM Sans', sans-serif !important;
+        font-size: 0.72rem !important;
+        text-transform: uppercase !important;
+        letter-spacing: 0.05em !important;
+        color: #7a8fa6 !important;
+        background: #f7fafa !important;
+    }
+
+    /* ── Expander: SQL panel styling ── */
+    details[data-testid="stExpander"] {
+        border: 1px solid #e8edf2 !important;
+        border-radius: 0 0 8px 8px !important;
+        border-top: none !important;
+        background: white !important;
+    }
+    details[data-testid="stExpander"] summary {
+        font-family: 'DM Mono', monospace !important;
+        font-size: 0.78rem !important;
+        color: #7a8fa6 !important;
+        letter-spacing: 0.04em !important;
+        padding: 0.6rem 1.2rem !important;
+        background: white !important;
+    }
+    details[data-testid="stExpander"] summary:hover {
+        background: #f7fafa !important;
+    }
+
+    /* ── Code block: dark background ── */
+    [data-testid="stCode"] {
+        background: #1a2332 !important;
+    }
+    [data-testid="stCode"] pre {
+        background: #1a2332 !important;
+        margin: 0 !important;
+        padding: 0.85rem 1.1rem !important;
+    }
+    [data-testid="stCode"] code {
+        font-family: 'DM Mono', monospace !important;
+        font-size: 0.78rem !important;
+        color: #a8d8dc !important;
+        line-height: 1.7 !important;
+        background: transparent !important;
+    }
+
+    /* ── st.chat_input styling ── */
+    [data-testid="stChatInput"] {
+        border-color: #d1dce6 !important;
+        border-radius: 10px !important;
+        font-family: 'DM Sans', sans-serif !important;
+        font-size: 0.925rem !important;
+    }
+    [data-testid="stChatInput"]:focus-within {
+        border-color: #0e7c86 !important;
+    }
+    [data-testid="stChatInput"] textarea {
+        padding: 10px 12px !important;
+        min-height: 56px !important;   /* was 42px — increase this value */
+        max-height: 56px !important;   /* pin the ceiling to match */
+        height: 56px !important;       /* explicit height overrides stretching */
+        resize: none !important;       /* prevents manual resize handle appearing */
+    }
+
+    /* ── st.warning / st.error / st.info banners ── */
+    [data-testid="stAlert"][data-baseweb="notification"][kind="warning"] {
+        background: #fffbeb !important;
+        border: 1px solid #fcd34d !important;
+        color: #92400e !important;
+        font-family: 'DM Sans', sans-serif !important;
+        font-size: 0.82rem !important;
+    }
+
+    /* ── Chat input bottom bar + footer line ── */
+    [data-testid="stBottom"] {
+        background: white !important;
+        border-top: 1px solid #e8edf2 !important;
+        box-shadow: 0 -4px 20px rgba(0,0,0,0.07) !important;
+        padding: 8px 16px 4px !important;  /* tight: top 8, sides 16, bottom 4 */
+    }
+    [data-testid="stBottom"]::after {
+        content: "Enter to send · Shift+Enter for new line";
+        display: block;
+        text-align: center;
+        font-size: 12px;
+        color: #a0b0bf;
+        font-family: 'DM Mono', monospace;
+        padding: 2px 0 4px;
+        margin-top: 2px;
+    }
+
+    /* ── Hide Streamlit default menu/footer ── */
+    #MainMenu, footer { visibility: hidden; }
+    </style>
+    """,
         unsafe_allow_html=True,
     )
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# CHART HELPERS (ADR-041 — Option A: heuristic, frontend-only)
+# CHART HELPERS (ADR-042 — Option B: three-level priority chain)
+# Priority: prompt keyword → Gemini annotation → DataFrame heuristic → bar
 # ══════════════════════════════════════════════════════════════════════════════
 
 
-def detect_chart_hint(question: str) -> str:
+def _keyword_hint(question: str) -> str | None:
     """
-    Parse user question for explicit chart type keywords.
+    Scan user question for explicit chart-type keywords (Priority 1).
 
-    Priority: first keyword match wins. Returns "auto" if no keyword found.
-    This is purely frontend — never passed to the backend or Gemini.
-
-    Returns: "line" | "bar" | "table" | "auto"
+    Priority order matches PROMPT_KEYWORDS dict order: pie, scatter, line,
+    bar, table. First match wins — returns None if no keyword found.
+    This is entirely frontend; never passed to the backend or Gemini.
     """
     q = question.lower()
-    for chart_type, keywords in CHART_KEYWORDS.items():
+    for chart_type, keywords in PROMPT_KEYWORDS.items():
         if any(kw in q for kw in keywords):
             return chart_type
-    return "auto"
+    return None
 
 
-def auto_detect_chart(df: pd.DataFrame) -> str:
+def _heuristic(df: pd.DataFrame) -> str:
     """
-    Heuristic chart type detection from DataFrame structure (ADR-041).
+    DataFrame shape heuristic — Priority 3 (last resort before default bar).
 
     Rules (applied in order):
-    1. Exactly one numeric col + one non-numeric col → chart candidate.
-    2. Non-numeric col contains temporal values (week, date, month, quarter
-       keywords) → line chart.
-    3. Non-numeric col is categorical → bar chart.
-    4. All other shapes → "table" (dataframe fallback).
+    1. Two or more numeric cols + one non-numeric col:
+       - If column names suggest an X/Y comparison (e.g. 'price_vs_volume',
+         'spend' paired with 'uplift') → scatter.
+       - Otherwise → bar (stacked bar rendered by render_bar when len(num)>=2).
+    2. Exactly one numeric + one non-numeric col → check for temporal values
+       → line chart; otherwise bar chart.
+    3. All other shapes (all-numeric, all-categorical, etc.) → "table".
 
-    Returns: "line" | "bar" | "table"
+    Returns: "scatter" | "line" | "bar" | "table"
     """
-    num_cols = df.select_dtypes(include="number").columns.tolist()
-    cat_cols = df.select_dtypes(exclude="number").columns.tolist()
-
-    if len(num_cols) != 1 or len(cat_cols) < 1:
+    if df is None or df.empty:
         return "table"
 
-    # Temporal signal: check column name and sample values
-    temporal_tokens = [
-        "week",
-        "w1",
-        "w2",
-        "w3",
-        "w4",
-        "w5",
-        "w6",
-        "w7",
-        "w8",
-        "jan",
-        "feb",
-        "mar",
-        "apr",
-        "may",
-        "jun",
-        "jul",
-        "aug",
-        "sep",
-        "oct",
-        "nov",
-        "dec",
-        "q1",
-        "q2",
-        "q3",
-        "q4",
-        "date",
-        "month",
-        "quarter",
-        "daily",
-    ]
-    x_col = cat_cols[0]
-    col_name_lower = x_col.lower()
-    sample_lower = str(df[x_col].iloc[0]).lower() if not df.empty else ""
+    numeric_cols = df.select_dtypes(include="number").columns.tolist()
+    non_numeric = [c for c in df.columns if c not in numeric_cols]
 
-    if any(tok in col_name_lower or tok in sample_lower for tok in temporal_tokens):
-        return "line"
+    # Two numeric dims + at least one label column
+    if len(numeric_cols) >= 2 and len(non_numeric) >= 1:
+        # Only treat as scatter when column names imply an X/Y axis comparison.
+        # A pair like (baseline_volume, incremental_volume) is a stacked bar,
+        # not a scatter — the values are measures of the same entity per row.
+        scatter_tokens = ["price", "spend", "cost", "margin", "rate", "index",
+                          "elasticity", "vs", "versus", "against", "correlation"]
+        col_names_lower = " ".join(numeric_cols).lower()
+        if any(t in col_names_lower for t in scatter_tokens):
+            return "scatter"
+        return "bar"  # stacked bar — render_bar handles len(num_cols) >= 2
 
+    # One numeric + one non-numeric → bar or line
+    if len(numeric_cols) == 1 and len(non_numeric) == 1:
+        col_name = non_numeric[0].lower()
+        sample = str(df[non_numeric[0]].iloc[0]).lower() if not df.empty else ""
+        temporal_tokens = [
+            "w1",
+            "w2",
+            "week",
+            "jan",
+            "feb",
+            "mar",
+            "apr",
+            "may",
+            "jun",
+            "jul",
+            "aug",
+            "sep",
+            "oct",
+            "nov",
+            "dec",
+            "q1",
+            "q2",
+            "q3",
+            "q4",
+            "date",
+            "month",
+            "quarter",
+            "daily",
+            "20",
+        ]
+        if any(t in col_name or t in sample for t in temporal_tokens):
+            return "line"
+        return "bar"
+
+    return "table"
+
+
+def resolve_chart_type(
+    question: str,
+    suggested_chart_type: str,
+    df: pd.DataFrame,
+) -> str:
+    """
+    Resolve the final chart type using the ADR-042 three-level priority chain.
+
+    Priority (highest to lowest):
+    1. Prompt keyword — explicit user intent overrides everything.
+    2. Gemini annotation — semantic understanding of query intent.
+    3. DataFrame shape heuristic — structural fallback.
+    4. Default: "bar" — never returns "table" unless keyword/annotation forced it.
+
+    Returns one of: "bar" | "line" | "pie" | "scatter" | "table"
+    """
+    # P1: keyword override
+    keyword = _keyword_hint(question)
+    if keyword:
+        return keyword
+
+    # P2: Gemini annotation
+    if suggested_chart_type and suggested_chart_type not in ("auto", ""):
+        return suggested_chart_type
+
+    # P3: heuristic
+    h = _heuristic(df)
+    if h != "table":
+        return h
+
+    # P4: default
     return "bar"
 
 
-def _build_plotly_chart(df: pd.DataFrame, chart_type: str) -> go.Figure:
-    """
-    Build a Plotly figure for the given DataFrame and inferred chart type.
+# ── Shared layout helpers ─────────────────────────────────────────────────────
 
-    Bar chart colours cycle through C["bar_colors"].
-    Horizontal bar used when avg categorical label length > 4 chars.
-    Line chart: single teal line (#2ca58d), strokeWidth 2.5, circular dots.
-    Both: no axis lines, no tick lines, horizontal #e8edf2 gridlines only.
-    """
-    num_cols = df.select_dtypes(include="number").columns.tolist()
-    cat_cols = df.select_dtypes(exclude="number").columns.tolist()
 
-    if not num_cols or not cat_cols:
-        return None
-
-    x_col = cat_cols[0]
-    y_col = num_cols[0]
-    bar_colors = C["bar_colors"]
-
-    layout_common = dict(
+def _base_layout() -> dict:
+    """Base Plotly layout applied to all chart types."""
+    return dict(
         paper_bgcolor="white",
         plot_bgcolor="white",
-        margin=dict(t=8, b=8, l=0, r=16),
-        height=200,
-        font=dict(family="DM Sans, sans-serif", size=12, color="#4a5568"),
-        showlegend=False,
+        margin=dict(t=28, b=8, l=8, r=8),
+        font=dict(family="DM Sans, sans-serif", size=12, color="#1a2332"),
+        xaxis=dict(
+            showgrid=False,
+            zeroline=False,
+            showline=False,
+            tickfont=dict(family="DM Mono, monospace", size=11, color="#7a8fa6"),
+        ),
+        yaxis=dict(
+            showgrid=True,
+            gridcolor=C["border"],
+            zeroline=False,
+            showline=False,
+            tickfont=dict(family="DM Mono, monospace", size=11, color="#7a8fa6"),
+        ),
     )
-    axis_common = dict(
-        showgrid=False,
-        zeroline=False,
-        showline=False,
-        tickfont=dict(family="DM Mono, monospace", size=11, color="#7a8fa6"),
-    )
-    xaxis_style = {
-        **axis_common,
-        "tickfont": dict(family="DM Sans, sans-serif", size=12, color="#4a5568"),
-    }
-
-    if chart_type == "line":
-        fig = go.Figure()
-        fig.add_trace(
-            go.Scatter(
-                x=df[x_col],
-                y=df[y_col],
-                mode="lines+markers",
-                line=dict(color=C["teal"], width=2.5),
-                marker=dict(color=C["teal"], size=7, line=dict(width=0)),
-            )
-        )
-        fig.update_layout(
-            **layout_common,
-            xaxis=dict(**xaxis_style, showgrid=False),
-            yaxis=dict(
-                **axis_common, showgrid=True, gridcolor=C["border"], gridwidth=1
-            ),
-        )
-        return fig
-
-    # Bar chart
-    avg_label_len = df[x_col].astype(str).str.len().mean() if not df.empty else 0
-    use_horizontal = avg_label_len > 4
-
-    colors = [bar_colors[i % len(bar_colors)] for i in range(len(df))]
-
-    if use_horizontal:
-        fig = go.Figure()
-        fig.add_trace(
-            go.Bar(
-                x=df[y_col],
-                y=df[x_col],
-                orientation="h",
-                marker=dict(color=colors, line=dict(width=0)),
-            )
-        )
-        fig.update_layout(
-            **layout_common,
-            height=max(200, 40 * len(df) + 40),
-            xaxis=dict(
-                **axis_common, showgrid=True, gridcolor=C["border"], gridwidth=1
-            ),
-            yaxis=dict(**xaxis_style, showgrid=False, autorange="reversed"),
-        )
-    else:
-        fig = go.Figure()
-        fig.add_trace(
-            go.Bar(
-                x=df[x_col],
-                y=df[y_col],
-                marker=dict(color=colors, line=dict(width=0)),
-            )
-        )
-        fig.update_layout(
-            **layout_common,
-            xaxis=dict(**xaxis_style, showgrid=False),
-            yaxis=dict(
-                **axis_common, showgrid=True, gridcolor=C["border"], gridwidth=1
-            ),
-        )
-    return fig
 
 
-def _chart_axis_label(df: pd.DataFrame, question: str) -> str:
-    """Generate 11px DM Mono uppercase axis label from DataFrame column names."""
+def _axis_label(df: pd.DataFrame) -> str:
+    """Generate uppercase DM Mono axis label from the first numeric column name."""
     num_cols = df.select_dtypes(include="number").columns.tolist()
     if not num_cols:
         return ""
     return num_cols[0].replace("_", " ").upper()
+
+
+def _format_axis_labels(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Format temporal dimension columns for display: Q→'Q2', W→'W12', month→'Jan'.
+    Returns a copy — never mutates the original DataFrame.
+
+    Matching rules (substring matching is intentionally avoided):
+    - Quarter: col name IS 'quarter', or ends with '_quarter', or starts with 'quarter_'
+      Excludes: 'quarterly_revenue', 'quarterly_growth_pct', 'q_on_q_growth', etc.
+    - Week:    same boundary rule, plus col must be integer-typed
+      Excludes: 'week_date', 'weekly_revenue', 'by_week', etc.
+    - Month:   same boundary rule, integer-typed only
+    """
+    df = df.copy()
+    for col in df.columns:
+        col_l = col.lower()
+
+        is_quarter_dim = (
+            col_l == "quarter"
+            or col_l.endswith("_quarter")
+            or col_l.startswith("quarter_")
+        )
+        is_week_dim = (
+            (col_l == "week_number" or col_l == "week"
+             or col_l.endswith("_week") or col_l.startswith("week_"))
+            and "date" not in col_l
+            and df[col].dtype in ("int64", "int32", "float64")
+        )
+        is_month_dim = (
+            col_l == "month"
+            or col_l.endswith("_month")
+            or col_l.startswith("month_")
+        ) and df[col].dtype in ("int64", "int32", "float64")
+
+        if is_quarter_dim and df[col].dtype in ("int64", "int32", "float64"):
+            df[col] = df[col].apply(
+                lambda v: f"Q{int(v)}" if pd.notna(v) else v
+            )
+        elif is_week_dim:
+            df[col] = df[col].apply(
+                lambda v: f"W{int(v)}" if pd.notna(v) else v
+            )
+        elif is_month_dim:
+            df[col] = df[col].apply(
+                lambda v: calendar.month_abbr[int(v)]
+                if pd.notna(v) and 1 <= int(v) <= 12 else v
+            )
+    return df
+
+# ── Chart render functions ────────────────────────────────────────────────────
+
+
+def render_bar(df: pd.DataFrame) -> None:
+    """
+    Render a bar chart.
+
+    Modes (auto-detected from DataFrame shape):
+    - Stacked bar: one categorical col + two or more numeric cols.
+      Each numeric col becomes a stacked segment (e.g. baseline + incremental).
+      Horizontal orientation when average label length > 4 chars.
+    - Simple bar:  one categorical col + exactly one numeric col.
+      Bar colours cycle through BAR_COLORS.
+      Horizontal orientation when average label length > 4 chars.
+
+    Falls back to st.dataframe when no numeric or no categorical column found.
+    """
+    df = _format_axis_labels(df)
+
+    # ── Reclassify integer year/quarter/week/month columns as categorical ──
+    # Prevents year being treated as a numeric measure in stacked bar mode.
+    temporal_dim_names = {"year", "quarter", "month", "week", "week_number"}
+    for col in df.select_dtypes(include="number").columns:
+        if col.lower() in temporal_dim_names:
+            df[col] = df[col].astype(str)
+
+    num_cols = df.select_dtypes(include="number").columns.tolist()
+    cat_cols = df.select_dtypes(exclude="number").columns.tolist()
+    if not num_cols or not cat_cols:
+        st.dataframe(df, width='stretch', hide_index=True)
+        return
+
+    x_col = cat_cols[0]
+    avg_label_len = df[x_col].astype(str).str.len().mean() if not df.empty else 0
+    layout = _base_layout()
+
+    if len(num_cols) >= 2:
+        # ── Stacked bar (multiple measures per category) ───────────────────────
+        # Typical case: sku × (total_volume, baseline_volume, incremental_volume)
+        # or brand × (gross_revenue, net_revenue).
+        # Use the first num_col as the primary label source for the axis header.
+        label = num_cols[0].replace("_", " ").upper()
+        if label:
+            st.markdown(
+                f'<p style="font-size:0.7rem;color:{C["text_muted"]};'
+                f"font-family:'DM Mono',monospace;margin-bottom:0.4rem;"
+                f'letter-spacing:0.05em;text-transform:uppercase">{label}</p>',
+                unsafe_allow_html=True,
+            )
+
+        fig = go.Figure()
+        horizontal = avg_label_len > 4
+        for i, y_col in enumerate(num_cols):
+            clean_name = y_col.replace("_", " ").title()
+            if horizontal:
+                fig.add_trace(go.Bar(
+                    y=df[x_col],
+                    x=df[y_col],
+                    name=clean_name,
+                    orientation="h",
+                    marker=dict(color=BAR_COLORS[i % len(BAR_COLORS)], line=dict(width=0)),
+                ))
+            else:
+                fig.add_trace(go.Bar(
+                    x=df[x_col],
+                    y=df[y_col],
+                    name=clean_name,
+                    marker=dict(color=BAR_COLORS[i % len(BAR_COLORS)], line=dict(width=0)),
+                ))
+
+        layout["barmode"] = "stack"
+        layout["showlegend"] = True
+        layout["legend"] = dict(
+            font=dict(family="DM Sans, sans-serif", size=11),
+            orientation="h",
+            yanchor="bottom",
+            y=1.02,
+            xanchor="left",
+            x=0,
+        )
+        if horizontal:
+            layout["height"] = max(200, 40 * len(df) + 80)
+            layout["xaxis"]["showgrid"] = True
+            layout["yaxis"]["showgrid"] = False
+            layout["yaxis"]["autorange"] = "reversed"
+        else:
+            layout["height"] = 300
+        fig.update_layout(**layout)
+        st.plotly_chart(fig, width='stretch')
+
+    else:
+        # ── Simple or grouped bar (one measure) ───────────────────────────────
+        y_col = num_cols[0]
+        label = y_col.replace("_", " ").upper()
+        if label:
+            st.markdown(
+                f'<p style="font-size:0.7rem;color:{C["text_muted"]};'
+                f"font-family:'DM Mono',monospace;margin-bottom:0.4rem;"
+                f'letter-spacing:0.05em;text-transform:uppercase">{label}</p>',
+                unsafe_allow_html=True,
+            )
+
+        horizontal = avg_label_len > 4
+
+        # If a second categorical col exists, use it as a colour/group dimension
+        color_col = cat_cols[1] if len(cat_cols) >= 2 else None
+
+        if horizontal:
+            fig = px.bar(
+                df, y=x_col, x=y_col,
+                color=color_col,
+                orientation="h",
+                barmode="group",
+                color_discrete_sequence=BAR_COLORS,
+            )
+            layout["xaxis"]["title"] = None
+            layout["yaxis"]["title"] = None
+        else:
+            fig = px.bar(
+                df, x=x_col, y=y_col,
+                color=color_col,
+                barmode="group",
+                color_discrete_sequence=BAR_COLORS,
+            )
+            layout["xaxis"]["title"] = None
+            layout["yaxis"]["title"] = None
+
+        fig.update_layout(**layout)
+        st.plotly_chart(fig, width='stretch')
+
+
+def render_line(df: pd.DataFrame) -> None:
+    # Preserve original sort order before formatting changes dtypes
+    df = df.copy()
+
+    # ── Temporal column detection ─────────────────────────────────────────────
+    # Priority: more granular periods preferred as x-axis.
+    # date=0 (finest) … year=4 (coarsest).
+    # Columns with ≤1 unique value (e.g. year=2025 throughout) are skipped.
+    #
+    # IMPORTANT: use strict word-boundary matching, NOT substring.
+    # "quarterly_net_revenue_gbp" contains "quarter" as a substring but is
+    # a metric, not a temporal dimension.  Boundary rules:
+    #   exact  → col_l == token
+    #   suffix → col_l.endswith("_quarter")  e.g. fiscal_quarter
+    #   prefix → col_l.startswith("quarter_") e.g. quarter_id
+    # This mirrors the rule in _format_axis_labels().
+    _TEMPORAL_PRIORITY = {
+        "date": 0, "week": 1, "month": 2,
+        "quarter": 3, "period": 3, "year": 4,
+    }
+
+    def _is_temporal_dim(col_l: str, token: str) -> bool:
+        return (
+            col_l == token
+            or col_l.endswith(f"_{token}")
+            or col_l.startswith(f"{token}_")
+        )
+
+    _all_temporal_cols: set[str] = set()
+    temporal_col: str | None = None
+    best_priority = 999
+
+    for col in df.columns:
+        col_l = col.lower()
+        for token, priority in _TEMPORAL_PRIORITY.items():
+            if _is_temporal_dim(col_l, token):
+                _all_temporal_cols.add(col)
+                if df[col].nunique() > 1 and priority < best_priority:
+                    best_priority = priority
+                    temporal_col = col
+                break  # one token match per column is enough
+
+    # ── Sort key: capture numeric order BEFORE label formatting ──────────────
+    sort_key = "_sort_key"
+    if temporal_col and df[temporal_col].dtype in ("int64", "int32", "float64"):
+        df[sort_key] = df[temporal_col]
+    else:
+        df[sort_key] = range(len(df))
+
+    # ── Format temporal labels (quarter→Q2, month→Jan, week→W12) ─────────────
+    df = _format_axis_labels(df)
+
+    num_cols = [c for c in df.select_dtypes(include="number").columns if c != sort_key]
+    cat_cols = df.select_dtypes(exclude="number").columns.tolist()
+
+    if not num_cols:
+        st.dataframe(df.drop(columns=[sort_key], errors="ignore"),
+                     width="stretch", hide_index=True)
+        return
+
+    # All-numeric df with no temporal or categorical dimension: no meaningful
+    # x-axis for a line chart (plotting price vs volume is a scatter concern).
+    # Fall back to table rather than producing a semantically meaningless chart.
+    if temporal_col is None and not cat_cols:
+        st.dataframe(df.drop(columns=[sort_key], errors="ignore"),
+                     width="stretch", hide_index=True)
+        return
+
+    x_col = temporal_col or (cat_cols[0] if cat_cols else df.columns[0])
+
+    # Exclude temporal dimensions from y_candidates — they are axis labels,
+    # not measures.  e.g. 'year' (int 2025) must not become the y-axis.
+    y_candidates = [
+        c for c in num_cols
+        if c != x_col and c not in _all_temporal_cols
+    ]
+    if not y_candidates:
+        # Relaxed fallback: accept any non-x numeric, but sort temporal cols
+        # to the END so a genuine measure is still preferred over a time dim.
+        y_candidates = sorted(
+            [c for c in num_cols if c != x_col],
+            key=lambda c: (1 if c in _all_temporal_cols else 0),
+        )
+    if not y_candidates:
+        st.dataframe(df.drop(columns=[sort_key], errors="ignore"),
+                     width="stretch", hide_index=True)
+        return
+
+    y_col = y_candidates[0]
+    series_col = next((c for c in cat_cols if c != x_col), None)
+
+    # Axis label (above chart) — derived from y column name
+    label = y_col.replace("_", " ").upper() if y_col else ""
+    if label:
+        st.markdown(
+            f'<p style="font-size:0.7rem;color:{C["text_muted"]};'
+            f"font-family:'DM Mono',monospace;margin-bottom:0.4rem;"
+            f'letter-spacing:0.05em;text-transform:uppercase">{label}</p>',
+            unsafe_allow_html=True,
+        )
+
+    # Build traces — sort by numeric sort_key to preserve correct period order
+    fig = go.Figure()
+    if series_col:
+        for i, (name, grp) in enumerate(df.groupby(series_col, sort=False)):
+            grp = grp.sort_values(sort_key)
+            fig.add_trace(go.Scatter(
+                x=grp[x_col], y=grp[y_col],
+                mode="lines+markers", name=str(name),
+                line=dict(color=BAR_COLORS[i % len(BAR_COLORS)], width=2.5),
+                marker=dict(size=7, line=dict(width=0)),
+            ))
+    else:
+        df_sorted = df.sort_values(sort_key)
+        fig.add_trace(go.Scatter(
+            x=df_sorted[x_col], y=df_sorted[y_col],
+            mode="lines+markers",
+            line=dict(color=C["teal"], width=2.5),
+            marker=dict(color=C["teal"], size=7, line=dict(width=0)),
+        ))
+
+    layout = _base_layout()
+    layout["height"] = 280
+    layout["xaxis"]["showgrid"] = False
+    layout["yaxis"]["showgrid"] = True
+    layout["showlegend"] = series_col is not None
+    fig.update_layout(**layout)
+
+    # Force categorical axis only when x was originally numeric (e.g. quarter int)
+    if temporal_col and pd.api.types.is_numeric_dtype(df[sort_key]):
+        fig.update_xaxes(type="category")
+
+    # Drop internal sort key before any fallback dataframe render
+    df.drop(columns=[sort_key], inplace=True, errors="ignore")
+    st.plotly_chart(fig, width="stretch")
+
+
+def render_pie(df: pd.DataFrame) -> None:
+    """
+    Render a donut/pie chart (hole=0.42).
+    First non-numeric col = labels; first numeric col = values.
+    Colours cycle through BAR_COLORS; legend shown.
+    """
+    cat_cols = df.select_dtypes(exclude="number").columns.tolist()
+    num_cols = df.select_dtypes(include="number").columns.tolist()
+    if not cat_cols or not num_cols:
+        # No label column — reshape: use column names as labels, row 0 as values
+        if num_cols and len(df) == 1:
+            reshaped = pd.DataFrame({
+                "metric": num_cols,
+                "value":  df[num_cols].iloc[0].values,
+            })
+            cat_cols = ["metric"]
+            num_cols = ["value"]
+            df = reshaped
+        else:
+            st.dataframe(df, width='stretch', hide_index=True)
+            return
+
+    label_col, value_col = cat_cols[0], num_cols[0]
+    fig = go.Figure(
+        data=[
+            go.Pie(
+                labels=df[label_col],
+                values=df[value_col],
+                hole=0.42,
+                marker=dict(colors=BAR_COLORS),
+                textfont=dict(family="DM Sans, sans-serif", size=12),
+                hovertemplate="%{label}: %{value} (%{percent})<extra></extra>",
+            )
+        ]
+    )
+    fig.update_layout(
+        paper_bgcolor="white",
+        margin=dict(t=20, b=20, l=20, r=20),
+        font=dict(family="DM Sans, sans-serif", size=12, color="#1a2332"),
+        legend=dict(font=dict(family="DM Sans, sans-serif", size=12)),
+        showlegend=True,
+    )
+    st.plotly_chart(fig, width='stretch')
+
+
+def render_scatter(df: pd.DataFrame) -> None:
+    """
+    Render a scatter plot.
+    First two numeric cols = x/y axes.
+    First non-numeric col (if present) = point label and colour.
+    """
+    num_cols = df.select_dtypes(include="number").columns.tolist()
+    cat_cols = df.select_dtypes(exclude="number").columns.tolist()
+    if len(num_cols) < 2:
+        st.dataframe(df, width='stretch', hide_index=True)
+        return
+
+    x_col, y_col = num_cols[0], num_cols[1]
+    label_col = cat_cols[0] if cat_cols else None
+
+    fig = px.scatter(
+        df,
+        x=x_col,
+        y=y_col,
+        text=label_col,
+        color=label_col if label_col else None,
+        color_discrete_sequence=BAR_COLORS,
+    )
+    fig.update_traces(
+        marker=dict(size=10, opacity=0.82),
+        textposition="top center",
+        textfont=dict(family="DM Sans, sans-serif", size=11, color="#1a2332"),
+    )
+    layout = _base_layout()
+    layout["showlegend"] = label_col is not None
+    fig.update_layout(**layout)
+    st.plotly_chart(fig, width='stretch')
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -488,6 +1006,9 @@ def _make_subtitle(question: str, sql: str = "") -> str:
     for suffix in [
         " as a line chart",
         " as a bar chart",
+        " as a pie chart",
+        " as a scatter plot",
+        " as a scatter",
         " as a table",
         " as a chart",
         " as line chart",
@@ -512,9 +1033,16 @@ def _highlight_chart_keyword(question: str) -> str:
     for kw in [
         "as a line chart",
         "as a bar chart",
+        "as a pie chart",
+        "as a donut chart",
+        "as a scatter",
+        "as a scatter plot",
         "as a table",
+        "as a chart",
+        "as a graph",
         "line chart",
         "bar chart",
+        "pie chart",
     ]:
         if kw in q_lower:
             idx = q_lower.index(kw)
@@ -534,52 +1062,13 @@ def _highlight_chart_keyword(question: str) -> str:
 
 def _render_header() -> None:
     """
-    Dark navy header: hamburger + logo + title + Conversational BI subtitle
-    on the left; ● READY badge on the right.
+    No custom HTML rendered here.
+    The native Streamlit header provides the dark bar and hamburger button,
+    styled via CSS. Project Insight branding lives in the sidebar header,
+    consistent with the pattern used by Claude.ai and ChatGPT.
+    New Chat is the primary button at the top of the sidebar.
     """
-    st.markdown(
-        f"""
-<div style="
-    background:{C["header"]};color:white;
-    padding:0 1.5rem 0 1rem;height:54px;
-    display:flex;align-items:center;justify-content:space-between;
-    position:sticky;top:0;z-index:100;
-    box-shadow:0 2px 12px rgba(0,0,0,0.18);
-    margin:-1.5rem -1.5rem 1.5rem -1.5rem;
-">
-  <div style="display:flex;align-items:center;gap:0.75rem">
-    <!-- Logo SVG -->
-    <svg width="28" height="28" viewBox="0 0 28 28" fill="none" aria-hidden="true">
-      <rect x="2"  y="16" width="5" height="10" rx="1.5" fill="#2ca58d" opacity="0.5"/>
-      <rect x="10" y="9"  width="5" height="17" rx="1.5" fill="#2ca58d" opacity="0.75"/>
-      <rect x="18" y="3"  width="5" height="23" rx="1.5" fill="#2ca58d"/>
-      <circle cx="7" cy="9" r="5" fill="#1a2332" stroke="#2ca58d" stroke-width="1.5"/>
-      <path d="M5 9h4M7 7v4" stroke="#2ca58d" stroke-width="1.5" stroke-linecap="round"/>
-    </svg>
-    <span style="font-weight:600;font-size:0.95rem;letter-spacing:0.01em;
-                 font-family:'DM Sans',sans-serif">
-      Project Insight
-    </span>
-    <span style="color:#4a7fa0;font-size:0.75rem;
-                 font-family:'DM Mono',monospace">
-      Conversational BI
-    </span>
-  </div>
-  <div style="
-      background:#2ca58d22;color:#2ca58d;
-      padding:3px 10px;border-radius:4px;
-      font-weight:500;font-size:0.75rem;
-      font-family:'DM Mono',monospace;
-      display:flex;align-items:center;gap:6px;
-  ">
-    <span style="width:6px;height:6px;border-radius:50%;
-                 background:#2ca58d;display:inline-block"></span>
-    READY
-  </div>
-</div>
-""",
-        unsafe_allow_html=True,
-    )
+    pass
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -589,14 +1078,81 @@ def _render_header() -> None:
 
 def _render_sidebar() -> None:
     """
-    st.sidebar past sessions panel.
-    Reads JSONL log, groups by session_id, renders as a clickable list.
-    Active session: teal left border + #e6f4f1 background.
+    Sidebar: LLM Toggle · Branding · New Chat button · past sessions · Clear Log footer.
+    Active session highlighted with teal left border.
     """
     with st.sidebar:
+
+        # ── LLM Mode toggle (placeholder — data governance feature) ───────────
+        mode = st.session_state.get("llm_mode", "cloud")
+        col_cloud, col_local = st.columns(2)
+        with col_cloud:
+            if st.button(
+                "☁ Cloud",
+                key="llm_cloud_btn",
+                use_container_width=True,
+                type="primary" if mode == "cloud" else "secondary",
+            ):
+                st.session_state.llm_mode = "cloud"
+                st.rerun()
+        with col_local:
+            if st.button(
+                "🔒 Local",
+                key="llm_local_btn",
+                use_container_width=True,
+                type="primary" if mode == "local" else "secondary",
+            ):
+                st.session_state.llm_mode = "local"
+                st.rerun()
+
+        if mode == "local":
+            st.markdown(
+                f"""<div style="
+                    background:{C["amber_bg"]};border:1px solid {C["amber_border"]};
+                    border-radius:6px;padding:0.4rem 0.75rem;margin-bottom:0.5rem;
+                    font-size:0.72rem;color:{C["amber"]};font-family:'DM Mono',monospace;
+                ">⚠ Local mode — not active in this prototype</div>""",
+                unsafe_allow_html=True,
+            )
+        st.markdown(
+            '<hr style="border:none;border-top:1px solid #e8edf2;margin:0.5rem 0 0.75rem"/>',
+            unsafe_allow_html=True,
+        )
+
+        # ── Branding ──────────────────────────────────────────────────────────
+        st.markdown(
+            """<div style="display:flex;align-items:center;gap:0.6rem;
+            padding:0.4rem 0 0.75rem;border-bottom:1px solid #e8edf2;margin-bottom:0.75rem">
+            <svg width="24" height="24" viewBox="0 0 28 28" fill="none" aria-hidden="true">
+                <rect x="2"  y="16" width="5" height="10" rx="1.5" fill="#2ca58d" opacity="0.5"/>
+                <rect x="10" y="9"  width="5" height="17" rx="1.5" fill="#2ca58d" opacity="0.75"/>
+                <rect x="18" y="3"  width="5" height="23" rx="1.5" fill="#2ca58d"/>
+                <circle cx="7" cy="9" r="5" fill="white" stroke="#2ca58d" stroke-width="1.5"/>
+                <path d="M5 9h4M7 7v4" stroke="#2ca58d" stroke-width="1.5" stroke-linecap="round"/>
+            </svg>
+            <div>
+                <div style="font-weight:600;font-size:0.88rem;color:#1a2332;
+                            font-family:'DM Sans',sans-serif;line-height:1.2">Project Insight</div>
+            </div>
+            </div>""",
+            unsafe_allow_html=True,
+        )
+
+        # ── New Chat — primary action ──────────────────────────────────────────
+        if st.button("＋ New Chat", key="new_chat_sidebar",
+                     use_container_width=True, type="primary"):
+            _start_new_session()
+
+        st.markdown(
+            '<hr style="border:none;border-top:1px solid #e8edf2;margin:0.75rem 0 0.6rem"/>',
+            unsafe_allow_html=True,
+        )
+
+        # ── Past sessions ─────────────────────────────────────────────────────
         st.markdown(
             "<p style=\"font-family:'DM Sans',sans-serif;font-weight:600;"
-            'font-size:0.88rem;color:#1a2332;margin:0.5rem 0 0.75rem">Past sessions</p>',
+            "font-size:0.82rem;color:#7a8fa6;margin:0 0 0.5rem;letter-spacing:0.04em\">"
+            "PAST SESSIONS</p>",
             unsafe_allow_html=True,
         )
 
@@ -605,31 +1161,52 @@ def _render_sidebar() -> None:
         if not sessions:
             st.markdown(
                 '<p style="font-size:0.78rem;color:#7a8fa6;'
-                "font-family:'DM Mono',monospace\">No past sessions yet.</p>",
+                "font-family:'DM Mono',monospace;margin:0\">No past sessions yet.</p>",
                 unsafe_allow_html=True,
             )
         else:
             active_sid = st.session_state.session_id
             for s in sessions:
                 is_active = s["id"] == active_sid
-                bg = C["teal_muted"] if is_active else "transparent"
-                border_color = C["teal_dark"] if is_active else "transparent"
-                date_color = C["teal_dark"] if is_active else C["text_muted"]
-                badge_bg = C["teal_dark"] if is_active else C["page_bg"]
-                badge_color = "white" if is_active else C["text_muted"]
-                badge_border = C["teal_dark"] if is_active else C["border"]
-                preview_color = C["navy"] if is_active else C["text_body"]
-                preview_weight = 500 if is_active else 400
+                label = f"{s['date']} · Q{s['q_count']} · {s['preview'][:38]}…"
+                if is_active:
+                    st.markdown(
+                        f"""<div style="
+                            border-left:3px solid {C["teal_dark"]};
+                            background:{C["teal_muted"]};
+                            border-radius:0 6px 6px 0;
+                            padding:0.45rem 0.75rem;
+                            font-size:0.8rem;
+                            color:{C["teal_dark"]};
+                            font-family:'DM Sans',sans-serif;
+                            margin-bottom:4px;
+                            cursor:default;
+                            line-height:1.4;
+                        ">{label}</div>""",
+                        unsafe_allow_html=True,
+                    )
+                else:
+                    if st.button(label, key=f"session_{s['id']}",
+                                 use_container_width=True):
+                        _load_session(s["id"])
 
-                label = f"{s['date']} · Q{s['q_count']} · {s['preview'][:40]}…"
-                if st.button(label, key=f"session_{s['id']}", use_container_width=True):
-                    _load_session(s["id"])
+        # ── Footer: Clear Log ─────────────────────────────────────────────────
+        st.markdown(
+            '<div style="border-top:1px solid #e8edf2;margin-top:1.25rem;'
+            'padding-top:0.75rem">',
+            unsafe_allow_html=True,
+        )
+        if st.button("🗑 Clear log", key="clear_log_btn",
+                     use_container_width=True):
+            import os
+            if os.path.exists("logs/interactions.jsonl"):
+                os.remove("logs/interactions.jsonl")
+            _start_new_session()
 
         st.markdown(
-            '<p style="font-size:0.72rem;color:#7a8fa6;'
-            "font-family:'DM Mono',monospace;margin-top:1rem;"
-            'border-top:1px solid #e8edf2;padding-top:0.75rem">'
-            "Sessions stored in audit log · read-only</p>",
+            '<p style="font-size:0.7rem;color:#a0b0bf;'
+            "font-family:'DM Mono',monospace;margin-top:0.5rem;text-align:center\">"
+            "Session History · Read-only</p></div>",
             unsafe_allow_html=True,
         )
 
@@ -642,8 +1219,7 @@ def _render_sidebar() -> None:
 def _render_banners() -> None:
     """
     Render zero, one, or two banners at the top of the thread:
-    1. Amber context window notice (if any turn has history_truncated=True)
-    2. Resumed session banner (three states: pending / running / complete)
+    Amber context window notice (if any turn has history_truncated=True)
     """
     # ── Amber context window banner ──────────────────────────────────────────
     any_truncated = any(
@@ -654,15 +1230,15 @@ def _render_banners() -> None:
         with col_warn:
             st.markdown(
                 f"""
-<div style="
-    background:{C["amber_bg"]};border:1px solid {C["amber_border"]};
-    border-radius:8px;padding:0.6rem 1rem;margin-bottom:1.25rem;
-    font-size:0.82rem;color:{C["amber"]};font-family:'DM Sans',sans-serif;
-">
-    ⚠️ Context window notice — oldest questions have been summarised to fit
-    within the model's context limit. Recent context is retained.
-</div>
-""",
+                <div style="
+                    background:{C["amber_bg"]};border:1px solid {C["amber_border"]};
+                    border-radius:8px;padding:0.6rem 1rem;margin-bottom:1.25rem;
+                    font-size:0.82rem;color:{C["amber"]};font-family:'DM Sans',sans-serif;
+                ">
+                    ⚠️ Context window notice — oldest questions have been summarised to fit
+                    within the model's context limit. Recent context is retained.
+                </div>
+                """,
                 unsafe_allow_html=True,
             )
         with col_x:
@@ -670,7 +1246,14 @@ def _render_banners() -> None:
                 st.session_state.warning_dismissed = True
                 st.rerun()
 
-    # ── Resumed session banner ───────────────────────────────────────────────
+
+
+# ── Resumed session banner ───────────────────────────────────────────────
+
+def _render_restore_bar() -> None:
+    """
+    Resumed session banner (three states: pending / running / complete)
+    """
     if st.session_state.resumed_from is None:
         return
 
@@ -680,71 +1263,50 @@ def _render_banners() -> None:
     n_restored = len(st.session_state.turns)
 
     if st.session_state.restore_running and not st.session_state.restore_complete:
-        # State 2 — running
         st.markdown(
             f"""
-<div style="
-    background:{C["teal_muted"]};border:1px solid {C["teal"]};
-    border-radius:8px;padding:0.6rem 1rem;margin-bottom:1.25rem;
-    font-size:0.82rem;color:{C["teal_dark"]};font-family:'DM Sans',sans-serif;
-    display:flex;align-items:center;gap:0.6rem;flex-wrap:wrap;
-">
-    <span>↺ Restoring question {n_restored + 1} of {n_total}… please wait</span>
-    <span style="margin-left:auto;font-size:0.78rem;
-                 font-family:'DM Mono',monospace;color:{C["text_muted"]}">
-        ← use sidebar for new session
-    </span>
-</div>
-""",
+            <div style="
+                background:{C["teal_muted"]};border:1px solid {C["teal"]};
+                border-radius:8px;padding:0.6rem 1rem;margin-bottom:1.25rem;
+                font-size:0.82rem;color:{C["teal_dark"]};font-family:'DM Sans',sans-serif;
+                display:flex;align-items:center;gap:0.6rem;flex-wrap:wrap;
+            ">
+                <span>↺ Restoring session… please wait</span>
+                <span style="margin-left:auto;font-size:0.78rem;
+                            font-family:'DM Mono',monospace;color:{C["text_muted"]}">
+                    ← use sidebar for new session
+                </span>
+            </div>
+            """,
             unsafe_allow_html=True,
         )
 
     elif st.session_state.restore_complete:
-        # State 3 — complete
-        col_msg, col_new = st.columns([8, 2])
-        with col_msg:
-            st.markdown(
-                f"""
-<div style="
-    background:{C["teal_muted"]};border:1px solid {C["teal"]};
-    border-radius:8px;padding:0.6rem 1rem;margin-bottom:1.25rem;
-    font-size:0.82rem;color:{C["teal_dark"]};font-family:'DM Sans',sans-serif;
-">
-    ↩ Resumed · {resumed_date} — all {n_total} question{"s" if n_total != 1 else ""} restored.
-    Ready to continue.
-</div>
-""",
-                unsafe_allow_html=True,
-            )
-        with col_new:
-            if st.button("← New session", key="new_session_complete"):
-                _start_new_session()
-
+        return
+    
     else:
         # State 1 — pending
-        col_msg, col_restore, col_new = st.columns([5, 2, 2])
+        col_msg, col_restore = st.columns([7, 2])
         with col_msg:
             st.markdown(
                 f"""
-<div style="
-    background:{C["teal_muted"]};border:1px solid {C["teal"]};
-    border-radius:8px;padding:0.6rem 1rem;margin-bottom:0;
-    font-size:0.82rem;color:{C["teal_dark"]};font-family:'DM Sans',sans-serif;
-">
-    ↩ Resumed · {resumed_date} — narrative &amp; SQL loaded.
-    Restore to view charts.
-</div>
-""",
+                <div style="
+                    background:{C["teal_muted"]};border:1px solid {C["teal"]};
+                    border-radius:8px;padding:0.6rem 1rem;margin-bottom:0;
+                    font-size:0.82rem;color:{C["teal_dark"]};font-family:'DM Sans',sans-serif;
+                ">
+                    ↩ Resumed · {resumed_date} — SQL loaded.
+                    Restore to view charts &amp; narrative.
+                </div>
+                """,
                 unsafe_allow_html=True,
             )
         with col_restore:
             if st.button("↺ Restore", key="restore_btn", type="primary"):
                 st.session_state.restore_running = True
                 st.rerun()
-        with col_new:
-            if st.button("← New session", key="new_session_pending"):
-                _start_new_session()
         st.markdown("<div style='margin-bottom:1.25rem'></div>", unsafe_allow_html=True)
+    
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -756,23 +1318,23 @@ def _render_empty_state() -> None:
     """Render centred empty state with three example prompt chip buttons."""
     st.markdown(
         """
-<div style="text-align:center;padding:4rem 1rem;color:#7a8fa6">
-    <svg width="40" height="40" viewBox="0 0 28 28" fill="none"
-         style="margin-bottom:1rem;opacity:0.4" aria-hidden="true">
-      <rect x="2"  y="16" width="5" height="10" rx="1.5" fill="#2ca58d" opacity="0.5"/>
-      <rect x="10" y="9"  width="5" height="17" rx="1.5" fill="#2ca58d" opacity="0.75"/>
-      <rect x="18" y="3"  width="5" height="23" rx="1.5" fill="#2ca58d"/>
-      <circle cx="7" cy="9" r="5" fill="#f0f4f6" stroke="#2ca58d" stroke-width="1.5"/>
-      <path d="M5 9h4M7 7v4" stroke="#2ca58d" stroke-width="1.5" stroke-linecap="round"/>
-    </svg>
-    <p style="font-size:1rem;font-family:'DM Sans',sans-serif;color:#7a8fa6;margin:0 0 0.4rem">
-        Ask a question about your FMCG sales data to get started.
-    </p>
-    <p style="font-size:0.78rem;font-family:'DM Mono',monospace;color:#a0b0bf;margin:0 0 2rem">
-        Powered by Gemini 2.5 Flash · DuckDB
-    </p>
-</div>
-""",
+        <div style="text-align:center;padding:4rem 1rem;color:#7a8fa6">
+            <svg width="40" height="40" viewBox="0 0 28 28" fill="none"
+                style="margin-bottom:1rem;opacity:0.4" aria-hidden="true">
+            <rect x="2"  y="16" width="5" height="10" rx="1.5" fill="#2ca58d" opacity="0.5"/>
+            <rect x="10" y="9"  width="5" height="17" rx="1.5" fill="#2ca58d" opacity="0.75"/>
+            <rect x="18" y="3"  width="5" height="23" rx="1.5" fill="#2ca58d"/>
+            <circle cx="7" cy="9" r="5" fill="#f0f4f6" stroke="#2ca58d" stroke-width="1.5"/>
+            <path d="M5 9h4M7 7v4" stroke="#2ca58d" stroke-width="1.5" stroke-linecap="round"/>
+            </svg>
+            <p style="font-size:1.25rem;font-family:'DM Sans',sans-serif;color:#7a8fa6;margin:0 0 0.4rem">
+                Project Insight
+            </p>
+            <p style="font-size:0.9rem;font-family:'DM Mono',monospace;color:#a0b0bf;margin:0 0 2rem">
+                Conversational BI powered by Streamlit · Gemini 2.5 Flash · DuckDB
+            </p>
+        </div>
+        """,
         unsafe_allow_html=True,
     )
 
@@ -781,15 +1343,15 @@ def _render_empty_state() -> None:
         with cols[i]:
             st.markdown(
                 f"""
-<div style="
-    background:white;border:1px solid #e8edf2;border-radius:10px;
-    padding:0.75rem 0.9rem;font-size:0.8rem;color:#2d3e50;
-    font-family:'DM Sans',sans-serif;line-height:1.45;
-    cursor:pointer;min-height:60px;
-">
-    "{prompt}"
-</div>
-""",
+            <div style="
+                background:white;border:1px solid #e8edf2;border-radius:10px;
+                padding:0.75rem 0.9rem;font-size:0.8rem;color:#2d3e50;
+                font-family:'DM Sans',sans-serif;line-height:1.45;
+                cursor:pointer;min-height:60px;
+            ">
+                "{prompt}"
+            </div>
+            """,
                 unsafe_allow_html=True,
             )
             if st.button("Ask this →", key=f"chip_{i}", use_container_width=True):
@@ -832,7 +1394,7 @@ def _render_chart_placeholder() -> None:
 ">
     <span style="font-size:20px;color:#7a8fa6;opacity:0.5">↺</span>
     <span style="font-size:12px;color:#7a8fa6;font-family:'DM Mono',monospace">
-        Chart data not loaded — click ↺ Restore above
+        Chart data not loaded — click ↺ Restore below.
     </span>
 </div>
 """,
@@ -881,7 +1443,7 @@ def _render_response_card(result: dict, is_pending: bool = False) -> None:
         [SQL expander]        ← st.expander + st.code
 
     Chart rendering heuristics (ADR-041 — documented here as per spec):
-        1. Check prompt keyword override first (detect_chart_hint)
+        1. Check prompt keyword override first (_keyword_hint)
         2. DataFrame with exactly one numeric + one non-numeric col → chart candidate
         3. Non-numeric col contains temporal values → line chart
         4. Non-numeric col is categorical → bar chart
@@ -925,36 +1487,36 @@ def _render_response_card(result: dict, is_pending: bool = False) -> None:
 
     st.markdown(
         f"""
-<div style="
-    background:#fafcfc;border:1px solid #e8edf2;
-    border-radius:4px 18px 4px 4px;border-bottom:none;
-    padding:0.75rem 1.2rem;
-    display:flex;align-items:center;gap:0.6rem;
-    margin-top:0.25rem;
-">
-    <div style="
-        width:26px;height:26px;border-radius:50%;
-        background:#e6f4f1;border:1.5px solid #2ca58d;
-        display:flex;align-items:center;justify-content:center;
-        font-size:11px;font-weight:600;color:#0e7c86;
-        flex-shrink:0;font-family:'DM Mono',monospace;
-    ">Q{qnum}</div>
-    <span style="font-size:13px;color:#7a8fa6;flex:1;
-                 font-family:'DM Sans',sans-serif;overflow:hidden;
-                 text-overflow:ellipsis;white-space:nowrap">
-        {subtitle}
-    </span>
-    {refined_badge}
-    <span style="font-size:11px;color:#7a8fa6;
+        <div style="
+            background:#fafcfc;border:1px solid #e8edf2;
+            border-radius:4px 18px 4px 4px;border-bottom:none;
+            padding:0.75rem 1.2rem;
+            display:flex;align-items:center;gap:0.6rem;
+            margin-top:0.25rem;
+        ">
+        <div style="
+            width:26px;height:26px;border-radius:50%;
+            background:#e6f4f1;border:1.5px solid #2ca58d;
+            display:flex;align-items:center;justify-content:center;
+            font-size:11px;font-weight:600;color:#0e7c86;
+            flex-shrink:0;font-family:'DM Mono',monospace;
+        ">Q{qnum}</div>
+        <span style="font-size:13px;color:#7a8fa6;flex:1;
+                    font-family:'DM Sans',sans-serif;overflow:hidden;
+                    text-overflow:ellipsis;white-space:nowrap">
+            {subtitle}
+        </span>
+        {refined_badge}
+        <span style="font-size:11px;color:#7a8fa6;
                  font-family:'DM Mono',monospace;white-space:nowrap;margin-left:4px">
         {ts_display}
-    </span>
-</div>
-<div style="
-    background:white;border:1px solid #e8edf2;border-top:none;
-    border-radius:0;padding:1.1rem 1.2rem 0.5rem;
-">
-""",
+        </span>
+        </div>
+        <div style="
+            background:white;border:1px solid #e8edf2;border-top:none;
+            border-radius:0;padding:1.1rem 1.2rem 0.5rem;
+        ">
+        """,
         unsafe_allow_html=True,
     )
 
@@ -962,73 +1524,61 @@ def _render_response_card(result: dict, is_pending: bool = False) -> None:
     if is_pending or df is None:
         _render_chart_placeholder()
     else:
-        # Determine default chart type
-        hint = detect_chart_hint(result.get("user_question", ""))
-        if hint == "table":
-            default_view = "Table"
-        elif hint in ("line", "bar"):
-            # Resolve chart type label for radio
-            default_view = "Line chart" if hint == "line" else "Bar chart"
-        else:
-            auto = auto_detect_chart(df)
-            if auto == "table":
-                default_view = "Table"
-            elif auto == "line":
-                default_view = "Line chart"
-            else:
-                default_view = "Bar chart"
+        suggested = result.get("suggested_chart_type", "auto")
+        resolved = resolve_chart_type(result.get("user_question", ""), suggested, df)
 
-        # Chart/table toggle — persist preference across reruns
+        # Build toggle: primary label (resolved type) + secondary (Table or Chart)
+        if resolved == "table":
+            toggle_opts = ["Table", "Bar chart"]
+        else:
+            toggle_opts = [CHART_LABELS.get(resolved, "Chart"), "Table"]
+
+        # Apply saved per-turn preference
         pref = st.session_state.view_prefs.get(turn_index)
-        is_line = default_view == "Line chart"
-        toggle_opts = ["Line chart" if is_line else "Bar chart", "Table"]
         index_default = 0
-        if pref == "table":
-            index_default = 1
-        elif pref in ("chart", "line", "bar"):
+        if pref == "table" and "Table" in toggle_opts:
+            index_default = toggle_opts.index("Table")
+        elif pref == "chart":
             index_default = 0
 
         view = st.radio(
-            "",
+            "Chart view",  # non-empty label
             toggle_opts,
             horizontal=True,
             index=index_default,
             key=f"view_{turn_index}",
+            label_visibility="collapsed",  # hides the label correctly
         )
+
         # Persist preference
         st.session_state.view_prefs[turn_index] = (
             "table" if view == "Table" else "chart"
         )
 
+        # Determine actual render type (handles "table" resolved + user switched to chart)
         if view == "Table":
-            st.dataframe(
-                df,
-                use_container_width=True,
-                hide_index=True,
-            )
+            render_type = "table"
+        elif resolved in ("bar", "line", "pie", "scatter"):
+            render_type = resolved
         else:
-            # Resolve final chart type for Plotly
-            if is_line or (hint == "auto" and auto_detect_chart(df) == "line"):
-                chart_type = "line"
-            else:
-                chart_type = "bar"
+            render_type = "bar"  # resolved=="table" but user picked the chart option
 
-            axis_label = _chart_axis_label(df, result.get("user_question", ""))
-            if axis_label:
-                st.markdown(
-                    f'<p style="font-size:0.7rem;color:#7a8fa6;'
-                    f"font-family:'DM Mono',monospace;margin-bottom:0.4rem;"
-                    f'letter-spacing:0.05em;text-transform:uppercase">'
-                    f"{axis_label}</p>",
-                    unsafe_allow_html=True,
-                )
+        # Dispatch to render function
+        if df.empty:
+            st.info("No data found for this query — try broadening the filters or rephrasing.")
+        elif render_type == "table":
+            st.dataframe(df, width='stretch', hide_index=True)
+        elif render_type == "pie":
+            render_pie(df)
+        elif render_type == "scatter":
+            render_scatter(df)
+        elif render_type == "line":
+            render_line(df)
+        else:
+            render_bar(df)
 
-            fig = _build_plotly_chart(df, chart_type)
-            if fig is not None:
-                st.plotly_chart(fig, use_container_width=True)
-            else:
-                # Fallback: df has unexpected shape
-                st.dataframe(df, use_container_width=True, hide_index=True)
+        # Record what was actually shown — picked up by log_turn() in handle_question()
+        result["rendered_chart_type"] = render_type
 
     # ── Narrative ────────────────────────────────────────────────────────────
     if narrative:
@@ -1122,7 +1672,7 @@ def _load_session(session_id: str) -> None:
 
 
 def _start_new_session() -> None:
-    """Clear all state and start a fresh session."""
+    """Clear all session state and start a fresh session."""
     for key in [
         "turns",
         "history",
@@ -1134,6 +1684,10 @@ def _start_new_session() -> None:
         "turns_raw",
         "view_prefs",
         "warning_dismissed",
+        "_confirm_new",
+        "_confirm_clear",
+        "pending_question",
+        "llm_mode"
     ]:
         st.session_state.pop(key, None)
     st.rerun()
@@ -1156,28 +1710,30 @@ def _run_restore_step() -> None:
         return
 
     past_turn = turns_raw[n_restored]
-    with st.spinner(f"Restoring question {n_restored + 1} of {n_total}…"):
-        result = run_turn(
-            past_turn["user_query"],
-            st.session_state.history,
-            st.session_state.conn,
-        )
+    result = run_turn(
+        past_turn["user_query"],
+        st.session_state.history,
+        st.session_state.conn,
+    )
 
     st.session_state.history = result["conversation_history"]
 
     if result["status"] == "success":
         result["_timestamp"] = past_turn.get("timestamp", "")[:10]
         result["_resumed_turn"] = n_restored == 0  # first restored turn gets divider
+        # Correct the turn_index so turn_id in the log continues from prior turns
+        result["turn_index"] = n_restored
         st.session_state.turns.append(result)
         try:
             log_turn(
                 result,
                 session_id=st.session_state.session_id,
+                rendered_chart_type=result.get("rendered_chart_type", "auto"),
                 resumed=True,
                 resumed_at=datetime.now().isoformat(),
             )
         except LogWriteError:
-            st.warning("Log write failed — turn not recorded.")
+            st.toast("Log write failed — turn not recorded.", icon="⚠️")
 
     # Trigger next step
     st.rerun()
@@ -1188,15 +1744,46 @@ def _run_restore_step() -> None:
 # ══════════════════════════════════════════════════════════════════════════════
 
 
+def _resolve_rendered_chart_type(result: dict) -> str:
+    """
+    Resolve the chart type that will be rendered for this result, using the
+    same priority chain as _render_response_card(), without rendering anything.
+    Used by handle_question() to capture rendered_chart_type before log_turn().
+    """
+    df = result.get("data")
+    if df is None or df.empty:
+        return "none"
+    suggested = result.get("suggested_chart_type", "auto")
+    return resolve_chart_type(result.get("user_question", ""), suggested, df)
+
+
 def handle_question(question: str) -> None:
     """
-    Execute one turn: call run_turn(), update session state, log, rerun.
-    Error turns are NOT added to turns or history.
+    Stage 1 of 2: store question in pending_question and rerun immediately.
+    This causes main() to render the user bubble before the LLM call starts,
+    so the user sees their question echoed back instantly on pressing Enter.
+    The actual run_turn() call happens in _execute_pending_question(), which
+    main() calls on the next rerun when pending_question is set.
     """
+    st.session_state.pending_question = question
+    st.rerun()
+
+
+def _execute_pending_question() -> None:
+    """
+    Stage 2 of 2: called by main() when pending_question is set.
+    Runs run_turn(), clears pending state, logs, and reruns to show the
+    response card. The user bubble was already rendered in this rerun by
+    main() before this function is called.
+    """
+    question = st.session_state.pending_question
     conn = st.session_state.conn
 
     with st.spinner("Analysing…"):
         result = run_turn(question, st.session_state.history, conn)
+
+    # Clear pending immediately — whether success or error
+    st.session_state.pending_question = None
 
     # Always assign history back — failed turns return unchanged history
     st.session_state.history = result["conversation_history"]
@@ -1204,30 +1791,46 @@ def handle_question(question: str) -> None:
     if result["status"] == "error":
         stage = result.get("error_stage", "unknown")
         if stage == "nl2sql":
-            st.error(
-                "Could not generate a query for that question. Please try rephrasing."
+            st.toast(
+                "⚠ Could not generate a query for that question. "
+                "Please try rephrasing.",
+                icon="🚫",
             )
         elif stage == "execution":
-            st.error(
-                "The query failed to execute after retries. "
-                "Please try a simpler question."
+            st.toast(
+                "⚠ The query failed to execute after retries. "
+                "Please try a simpler question.",
+                icon="🚫",
             )
         else:
-            st.error(f"An error occurred ({stage}). Please try again.")
-        # Failed turns NOT added to turns or history
-    else:
-        st.session_state.turns.append(result)
-        try:
-            log_turn(result, session_id=st.session_state.session_id)
-        except LogWriteError:
-            st.warning("Log write failed — turn not recorded.")
+            st.toast(f"⚠ An error occurred ({stage}). Please try again.", icon="🚫")
 
-    # Scroll to latest
-    components.html(
-        "<script>window.parent.document.querySelector('.main')"
-        ".scrollTo(0, 999999);</script>",
-        height=0,
-    )
+        # Log error turn — success_flag=False, rendered_chart_type="none"
+        try:
+            log_turn(
+                result,
+                session_id=st.session_state.session_id,
+                rendered_chart_type="none",
+            )
+        except LogWriteError:
+            pass  # non-fatal; don't surface a second warning on error path
+
+    else:
+        # Resolve rendered_chart_type now so the log entry is accurate
+        rendered_ct = _resolve_rendered_chart_type(result)
+        result["rendered_chart_type"] = rendered_ct
+
+        st.session_state.turns.append(result)
+
+        try:
+            log_turn(
+                result,
+                session_id=st.session_state.session_id,
+                rendered_chart_type=rendered_ct,
+            )
+        except LogWriteError:
+            st.toast("Log write failed — turn not recorded.", icon="⚠️")
+
     st.rerun()
 
 
@@ -1239,21 +1842,15 @@ def handle_question(question: str) -> None:
 def _render_footer() -> None:
     is_resumed = st.session_state.resumed_from is not None
 
-    if is_resumed and st.session_state.restore_running:
-        n = len(st.session_state.turns_raw)
-        r = len(st.session_state.turns)
-        footer_text = f"Restoring question {r + 1} of {n} — please wait"
-    elif is_resumed and not st.session_state.restore_complete:
-        footer_text = "Click ↺ Restore to reload chart data from previous session"
-    elif is_resumed:
+    if is_resumed and not st.session_state.restore_complete:
+        return  # ← ADD THIS: silent before restore completes
+
+    if is_resumed and st.session_state.restore_complete:
         date = st.session_state.resumed_from
         n = len(st.session_state.turns)
         footer_text = f"Continuing session from {date} · {n} question{'s' if n != 1 else ''} in history"
     else:
-        footer_text = (
-            "Powered by Gemini 2.5 Flash · DuckDB · "
-            "Enter to send · Shift+Enter for new line"
-        )
+        footer_text = "Enter to send · Shift+Enter for new line"
 
     st.markdown(
         f'<p style="text-align:center;font-size:11px;color:#a0b0bf;'
@@ -1261,7 +1858,6 @@ def _render_footer() -> None:
         f"{footer_text}</p>",
         unsafe_allow_html=True,
     )
-
 
 # ══════════════════════════════════════════════════════════════════════════════
 # MAIN
@@ -1273,12 +1869,6 @@ def main() -> None:
     _inject_global_css()
     _render_header()
     _render_sidebar()
-
-    # ── Restore step (one question per rerun, State 2) ────────────────────────
-    if st.session_state.restore_running and not st.session_state.restore_complete:
-        _run_restore_step()
-        # _run_restore_step() always calls st.rerun() so nothing below executes
-        return
 
     # ── Banners ───────────────────────────────────────────────────────────────
     _render_banners()
@@ -1308,10 +1898,11 @@ def main() -> None:
         first_resumed_done = False
 
         for result in st.session_state.turns:
-            # Resumed divider: before the first turn that carries _resumed flag
+            # Divider: between last restored turn and first new question
             if (
                 resumed_date
-                and result.get("_resumed_turn", False)
+                and st.session_state.restore_complete
+                and not result.get("_resumed_turn", False)
                 and not first_resumed_done
             ):
                 _render_resumed_divider(resumed_date)
@@ -1320,24 +1911,40 @@ def main() -> None:
             _render_user_bubble(result["user_question"])
             _render_response_card(result)
 
-    # ── Input bar ─────────────────────────────────────────────────────────────
+    # ── Pending question: render bubble immediately, then execute ─────────────
+    # When handle_question() stores a question and reruns, we arrive here with
+    # pending_question set. Render the bubble first so it's visible, then call
+    # _execute_pending_question() which blocks on run_turn() and reruns again
+    # to show the completed response card.
+    if st.session_state.pending_question:
+        _render_user_bubble(st.session_state.pending_question)
+        _execute_pending_question()
+        return  # _execute_pending_question always reruns; nothing below executes
+    
+    # ── Restore bar (resumed sessions only) ──────────────────────────────
+    _render_restore_bar()
+
+    # ── Restore step (one question per rerun, State 2) ────────────────────────
+    if st.session_state.restore_running and not st.session_state.restore_complete:
+        _run_restore_step()
+        return  # _run_restore_step() always calls st.rerun()
+
+    # ── Input bar ────────────────────────────────────────────────────────
     input_disabled = (
         st.session_state.resumed_from is not None
         and not st.session_state.restore_complete
     )
 
     placeholder = (
-        "Click ↺ Restore above to continue this session…"
+        "Click ↺ Restore to continue this session…"
         if input_disabled
-        else 'Ask a question — e.g. "2025 quarterly revenue growth of top 5 brands as a line chart"'
+        else 'Ask a question — e.g. "2025 quarterly revenue trend of top 5 brands as a line chart"'
     )
 
     if question := st.chat_input(placeholder, disabled=input_disabled):
         handle_question(question)
 
-    # ── Footer ────────────────────────────────────────────────────────────────
     _render_footer()
-
 
 if __name__ == "__main__":
     main()

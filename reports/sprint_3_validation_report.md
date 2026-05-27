@@ -1,7 +1,8 @@
 # Sprint 3 Validation Report — Agentic Loop + Conversation History
 
-**Candidate:** Manu Mohandas | **Employer:** TCS  
-**Run timestamp:** 2026-05-13 11:21:33  
+**Run by:** Manu Mohandas 
+**Sprint:** 3
+**Run timestamp:** 2026-01-25 11:21:33  
 **Model:** gemini-2.5-flash | **MAX_RETRIES:** 2  
 
 

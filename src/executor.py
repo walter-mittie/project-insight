@@ -3,7 +3,7 @@ src/executor.py
 ---------------
 F-09 · SQL Execution Layer
 
-AM1: Agentic Conversational BI — Manu Mohandas / TCS
+Project Insight: Agentic Conversational BI 
 
 Provides the public function:
 
@@ -49,8 +49,35 @@ import logging
 import duckdb
 import pandas as pd
 
+import concurrent.futures
+
 logger = logging.getLogger(__name__)
 
+QUERY_TIMEOUT_SECONDS = 30  # configurable — increase for complex aggregations
+
+def _run_query(conn: duckdb.DuckDBPyConnection, sql: str) -> pd.DataFrame:
+    """Inner function submitted to the thread executor."""
+    return conn.execute(sql).df()
+
+
+def execute_with_timeout(
+    conn: duckdb.DuckDBPyConnection,
+    sql: str,
+    timeout: int = QUERY_TIMEOUT_SECONDS,
+) -> pd.DataFrame:
+    """
+    Execute a DuckDB query with a timeout.
+    Raises TimeoutError if execution exceeds timeout seconds.
+    Used internally by execute_sql().
+    """
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(_run_query, conn, sql)
+        try:
+            return future.result(timeout=timeout)
+        except concurrent.futures.TimeoutError:
+            raise TimeoutError(
+                f"Query timed out after {timeout}s. Try a simpler question."
+            )
 
 def execute_sql(sql: str, conn: duckdb.DuckDBPyConnection) -> dict:
     """
@@ -91,7 +118,7 @@ def execute_sql(sql: str, conn: duckdb.DuckDBPyConnection) -> dict:
     t_start = time.perf_counter()
 
     try:
-        df: pd.DataFrame = conn.execute(sql).df()
+        df: pd.DataFrame = execute_with_timeout(conn, sql)
         exec_time_ms = (time.perf_counter() - t_start) * 1000.0
 
         row_count = len(df)

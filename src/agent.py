@@ -4,7 +4,7 @@ src/agent.py
 F-10 · Self-Correction Agentic Retry Loop
 F-11 · Conversation History Management (orchestration layer)
 
-AM1: Agentic Conversational BI — Manu Mohandas / TCS
+Project Insight: Agentic Conversational BI 
 
 Provides the single public function:
 
@@ -137,7 +137,7 @@ MAX_RETRIES = 2
 # Kept deliberately short — the history entry is context for the model, not
 # a full data snapshot.  The full DataFrame is in the run_turn() return dict
 # for the calling layer (Streamlit / Sprint 5 evaluator).
-HISTORY_RESULT_ROWS = 5
+HISTORY_RESULT_ROWS = 15
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -214,7 +214,10 @@ def _summarise_result_for_history(df: pd.DataFrame) -> str:
     if total <= HISTORY_RESULT_ROWS:
         return f"{total} row{'s' if total != 1 else ''}:\n{preview}"
     else:
-        return f"{total} rows total (showing first {HISTORY_RESULT_ROWS}):\n{preview}"
+        return (
+            f"{total} rows total (showing first {HISTORY_RESULT_ROWS}):\n"
+            f"{preview}"
+        )
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -226,6 +229,7 @@ def run_turn(
     user_question: str,
     conversation_history: list[dict],
     conn: duckdb.DuckDBPyConnection,
+    schema_override: str | None = None,
 ) -> dict:
     """
     Execute one full agentic turn: NL2SQL → execution → retry loop → narrative.
@@ -287,12 +291,11 @@ def run_turn(
     # nl2sql.py performs the actual truncation; we detect it here for the
     # return dict flag so Sprint 4 Streamlit can surface a notification.
     from src.nl2sql import MAX_HISTORY_TURNS
-
     if len(history) > MAX_HISTORY_TURNS:
         history_truncated = True
 
     # ── Stage 1: Initial SQL generation ───────────────────────────────────────
-    nl2sql_result = generate_sql(user_question, history)
+    nl2sql_result = generate_sql(user_question, history, schema_override=schema_override)
 
     if "error" in nl2sql_result:
         # LLM API failure or missing ```sql delimiter — not retryable at this
@@ -303,21 +306,20 @@ def run_turn(
             nl2sql_result.get("error"),
         )
         return {
-            "status": "error",
-            "error_stage": "nl2sql",
-            "error_type": nl2sql_result.get("error", "unknown"),
-            "error_message": nl2sql_result.get("message", nl2sql_result.get("raw", ""))[
-                :500
-            ],
-            "sql": None,
-            "retry_count": 0,
-            "turn_index": turn_index,
+            "status":               "error",
+            "error_stage":          "nl2sql",
+            "error_type":           nl2sql_result.get("error", "unknown"),
+            "error_message":        nl2sql_result.get("message", nl2sql_result.get("raw", ""))[:500],
+            "sql":                  None,
+            "retry_count":          0,
+            "turn_index":           turn_index,
             "conversation_history": conversation_history,
         }
 
     current_sql = nl2sql_result["sql"]
     current_reasoning = nl2sql_result["reasoning"]
     current_raw_nl2sql = nl2sql_result["raw"]
+    current_suggested_chart_type = nl2sql_result.get("suggested_chart_type", "auto")
 
     # ── Stage 2: Execution + self-correction retry loop (F-10) ────────────────
     exec_result = execute_sql(current_sql, conn)
@@ -364,26 +366,28 @@ def run_turn(
         current_sql = retry_nl2sql["sql"]
         current_reasoning = retry_nl2sql["reasoning"]
         current_raw_nl2sql = retry_nl2sql["raw"]
+        current_suggested_chart_type = retry_nl2sql.get("suggested_chart_type", "auto")
 
         exec_result = execute_sql(current_sql, conn)
 
     # ── Stage 2b: Handle persistent execution failure ─────────────────────────
     if exec_result["status"] == "error":
         logger.error(
-            "run_turn | execution failed after %d attempt(s) | turn=%d | %s: %s",
+            "run_turn | execution failed after %d attempt(s) | turn=%d | "
+            "%s: %s",
             retry_count + 1,
             turn_index,
             exec_result["error_type"],
             exec_result["error_message"][:200],
         )
         return {
-            "status": "error",
-            "error_stage": "execution",
-            "error_type": exec_result["error_type"],
-            "error_message": exec_result["error_message"],
-            "sql": current_sql,
-            "retry_count": retry_count,
-            "turn_index": turn_index,
+            "status":               "error",
+            "error_stage":          "execution",
+            "error_type":           exec_result["error_type"],
+            "error_message":        exec_result["error_message"],
+            "sql":                  current_sql,
+            "retry_count":          retry_count,
+            "turn_index":           turn_index,
             "conversation_history": conversation_history,  # original — unchanged
         }
 
@@ -407,9 +411,9 @@ def run_turn(
     # ── Stage 4: Append completed turn to history copy (F-11) ────────────────
     result_summary = _summarise_result_for_history(df)
     history_entry = {
-        "turn_index": turn_index,
-        "user_question": user_question,
-        "sql": current_sql,
+        "turn_index":     turn_index,
+        "user_question":  user_question,
+        "sql":            current_sql,
         "result_summary": result_summary,
     }
     history.append(history_entry)
@@ -426,18 +430,19 @@ def run_turn(
     )
 
     return {
-        "status": "success",
-        "user_question": user_question,
-        "sql": current_sql,
-        "reasoning": current_reasoning,
-        "data": df,
-        "row_count": exec_result["row_count"],
-        "exec_time_ms": exec_result["exec_time_ms"],
-        "narrative": narrative_text,
-        "retry_count": retry_count,
-        "turn_index": turn_index,
-        "history_truncated": history_truncated,
-        "raw_nl2sql": current_raw_nl2sql,
-        "raw_narrative": raw_narrative,
+        "status":               "success",
+        "user_question":        user_question,
+        "sql":                  current_sql,
+        "reasoning":            current_reasoning,
+        "data":                 df,
+        "row_count":            exec_result["row_count"],
+        "exec_time_ms":         exec_result["exec_time_ms"],
+        "narrative":            narrative_text,
+        "retry_count":          retry_count,
+        "turn_index":           turn_index,
+        "history_truncated":    history_truncated,
+        "suggested_chart_type": current_suggested_chart_type,  # ADR-042
+        "raw_nl2sql":           current_raw_nl2sql,
+        "raw_narrative":        raw_narrative,
         "conversation_history": history,  # updated copy — caller assigns explicitly
     }

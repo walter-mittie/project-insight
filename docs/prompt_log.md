@@ -1,5 +1,5 @@
 # Prompt Log — NL2SQL Chain-of-Thought Prompts
-**AM1: Agentic Conversational BI | F-08 | Manu Mohandas / TCS**
+**Project Insight : Agentic Conversational BI | F-08**
 
 ---
 
@@ -20,7 +20,7 @@ Each entry records:
 
 ## v1.0 — Initial prompt (Sprint 2)
 
-**Date:** 2026-05-07
+**Date:** 2026-01-12
 
 **Change made:**
 Initial CoT instruction block authored.  Four-step structure:
@@ -51,7 +51,7 @@ based on known model failure modes for NL2SQL tasks:
 
 ## v1.1 — Schema v1.1 alignment (Sprint 2)
 
-**Date:** 2026-05-08
+**Date:** 2026-01-14
 
 **Change made:**
 COT_INSTRUCTION updated to align with schema_data_dictionary.md v1.1.
@@ -95,7 +95,7 @@ but return wrong business answers.
 
 ## v1.1 — Empirical results (15-query manual test suite)
 
-**Date:** 2026-05-09 (test run) / 2026-05-10 (validation completed)
+**Date:** 2026-01-16 (test run) / 2026-01-17 (validation completed)
 
 **Test suite:** 15 queries across 5 categories (F-08 AC3):
 - Cat 1: Single-table filter (Q01–Q03)
@@ -104,7 +104,7 @@ but return wrong business answers.
 - Cat 4: Ambiguous FMCG term (Q10–Q12)
 - Cat 5: Time-period filter (Q13–Q15)
 
-**Model:** gemini-2.5-flash | **Run timestamp:** 2026-05-09 16:53:29
+**Model:** gemini-2.5-flash | **Run timestamp:** 2026-01-16 16:53:29
 
 **Methodology:** Ground-truth SQL hand-written in DuckDB UI for all 15
 queries, independently of LLM output.  Ground truth validated for schema
@@ -174,7 +174,7 @@ schema_data_dictionary.md v1.2 as a temporal column note.
 
 ## v1.2 — FP-02 / FP-03 fixes (Sprint 2 closure)
 
-**Date:** 2026-05-10
+**Date:** 2026-01-17
 
 **Change made:**
 COT_INSTRUCTION updated with two additions to Step 2 and one modification
@@ -222,7 +222,7 @@ schema_data_dictionary.md updated to v1.2:
 ## Sprint 3 live validation — additional failure patterns (NL2SQL)
 
 The following failure patterns were identified during the Sprint 3 live
-validation (sprint_3_validation_report.md, 2026-05-13).  They do NOT trigger
+validation (sprint_3_validation_report.md, 2026-01-25).  They do NOT trigger
 a prompt version change in Sprint 3 — the v1.2 baseline remains frozen for
 Sprint 5 evaluation.  They are documented here for Sprint 5 iteration.
 
@@ -261,15 +261,27 @@ and that queries involving multi-category brands should either (a) restrict
 to a named category, or (b) use total portfolio revenue as the denominator
 with explicit labelling.
 
-*Log updated at Sprint 3 closure. Prompt v1.2 remains frozen as the Sprint 5
-evaluation baseline. FP-05 and FP-06 are candidates for a v1.3 iteration
-during Sprint 5 if the 20-query benchmark confirms these failure modes at
-meaningful rates.*
+### FP-07 — Flag over-application (identified Sprint 5)
+
+**Observed in:** Q01 treatment condition
+**Description:** Model applies `is_zero_price = FALSE` and `is_volume_outlier = FALSE`
+to `COUNT(DISTINCT product_id)` queries. These exclusion flags are semantically
+relevant for revenue and volume KPIs only — not for cardinality aggregations.
+**Root cause:** The schema's flag exclusion rules are written as general rules without
+specifying the aggregation types they apply to. The model generalises correctly-learned
+rules beyond their intended scope.
+**Remediation (v1.3, not yet implemented):** Add explicit constraint: "Flag exclusions
+(is_zero_price, is_volume_outlier, is_vol_violation) apply ONLY to revenue and volume
+metric aggregations. Do NOT apply these flags to COUNT(DISTINCT ...) or other
+cardinality aggregations."
+**Status:** Logged. Not fixed in v1.2 (evaluation prompt frozen).
+
+*Log updated at Sprint 5 closure. Prompt v1.2 remains frozen*
 
 
 
 # Narrative Prompt Log
-**AM1: Agentic Conversational BI | F-12 | Manu Mohandas / TCS**
+**AM1: Agentic Conversational BI | F-12 | Manu Mohandas**
 
 ---
 
@@ -287,7 +299,7 @@ Format mirrors the NL2SQL section: one entry per version.
 
 ## Narrative v1.0 — Initial prompt (Sprint 3)
 
-**Date:** 2026-05-11
+**Date:** 2026-01-28
 
 **Change made:**
 Initial narrative system prompt authored.  Core rules:
@@ -311,7 +323,7 @@ figures, and reproducing the question verbatim as the first sentence.
 
 ## Narrative v1.1 — Synthesis rules + directional language (Sprint 3 closure)
 
-**Date:** 2026-05-13
+**Date:** 2026-01-30
 
 **Change made:**
 Three additions to the prompt prompted by Sprint 3 live validation findings

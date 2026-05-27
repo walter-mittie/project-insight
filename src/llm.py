@@ -4,7 +4,7 @@ src/llm.py
 F-06 · Gemini API Integration
 F-07 · RAG-Based Schema Injection
 
-AM1: Agentic Conversational BI — Manu Mohandas / TCS
+Project Insight: Agentic Conversational BI 
 
 Provides two public functions:
 
@@ -39,6 +39,8 @@ on client.models, which is used here.
 
 import os
 import logging
+import time
+import random
 
 from dotenv import load_dotenv
 
@@ -58,7 +60,13 @@ except ImportError as exc:
 # Single config constant for model version — never hardcode inline (F-06 AC3).
 # ADR-027: gemini-2.5-flash selected (available on Google AI Studio free tier).
 # Fallback model is gemini-1.5-flash (documented in ADR-027).
-MODEL = "gemini-2.5-flash"
+MODEL = "gemini-2.5-flash"  # primary model (already defined)
+MODEL_FALLBACK = "gemini-2.5-pro"  # fallback on sustained 503s
+
+_MAX_RETRIES = 5  # attempts per model
+_BASE_BACKOFF = 1.0  # seconds — doubles each attempt
+_JITTER_FRACTION = 0.3  # ±30 % randomisation
+_TRANSIENT_SIGNALS = ("503", "unavailable", "overloaded", "try again")
 
 # Path resolution: this file is src/llm.py — schema dict is ../docs/...
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -147,6 +155,26 @@ def load_schema_dict() -> str:
 # ──────────────────────────────────────────────────────────────────────────────
 
 
+def _call_model(client, model: str, prompt: str, system_prompt: str):
+    """Single blocking call to one model. Returns raw response."""
+    return client.models.generate_content(
+        model=model,
+        contents=prompt,
+        config=genai_types.GenerateContentConfig(
+            system_instruction=system_prompt,
+        ),
+    )
+
+
+def _is_transient(msg: str) -> bool:
+    return any(s in msg.lower() for s in _TRANSIENT_SIGNALS)
+
+
+def _is_rate_limit(msg: str) -> bool:
+    msg_l = msg.lower()
+    return "429" in msg or "rate limit" in msg_l or "quota" in msg_l
+
+
 def _get_client() -> genai.Client:
     """
     Instantiate and return a Gemini client using the API key from .env.
@@ -217,49 +245,109 @@ def get_llm_response(prompt: str, system_prompt: str) -> str:
     """
     Send a prompt to Gemini and return the parsed text response.
 
-    Parameters
-    ----------
-    prompt : str
-        The user-turn content (natural language question).
-    system_prompt : str
-        The system instruction block.  For NL2SQL calls this will already
-        contain the schema dict prepended by generate_sql() (F-07).
+    Retry strategy
+    ─────────────
+    Primary model (gemini-2.5-flash): up to _MAX_RETRIES attempts.
+    Each transient-503 retry sleeps:
+        delay = base * 2^(attempt-1)  ×  uniform(1 - jitter, 1 + jitter)
+        e.g. attempt 1 → ~1 s, 2 → ~2 s, 3 → ~4 s, 4 → ~8 s  (±30 %)
+    If the primary model exhausts all retries on transient errors, one
+    attempt is made on MODEL_FALLBACK before raising LLMError.
+
+    Rate-limit (429) and non-transient errors fail immediately on both
+    models — retrying won't help.
 
     Returns
-    -------
-    str
-        Clean parsed text from the model.
+    ───────
+    str  — clean parsed text from the model.
 
     Raises
-    ------
-    LLMError
-        On HTTP errors, rate limit (429), empty responses, missing API key,
-        or any other API-level failure.  No unhandled exceptions propagate
-        to the caller (F-06 AC4).
+    ──────
+    LLMError — on rate limit, exhausted retries, empty response, or any
+               non-transient API failure.
     """
     client = _get_client()
 
-    try:
-        response = client.models.generate_content(
-            model=MODEL,
-            contents=prompt,
-            config=genai_types.GenerateContentConfig(
-                system_instruction=system_prompt,
-            ),
-        )
-        if hasattr(response, 'usage_metadata') and response.usage_metadata:
-            cached = getattr(response.usage_metadata, 'cached_content_token_count', 0)
-            if cached:
-                logger.info("Cache hit: %d tokens served from implicit cache", cached)
-    except Exception as exc:
-        # Map all SDK-level exceptions to LLMError.
-        # Check for rate limit signal in the exception message.
-        msg = str(exc)
-        if "429" in msg or "rate" in msg.lower() or "quota" in msg.lower():
-            raise LLMError(
-                f"Gemini rate limit exceeded (429). "
-                f"Wait before retrying. Original error: {msg}"
-            ) from exc
-        raise LLMError(f"Gemini API call failed: {msg}") from exc
+    def _attempt_with_retries(model: str) -> str:
+        """Try one model up to _MAX_RETRIES times. Returns text or raises."""
+        last_exc: Exception | None = None
 
-    return _parse_response_text(response)
+        for attempt in range(1, _MAX_RETRIES + 1):
+            try:
+                response = _call_model(client, model, prompt, system_prompt)
+
+                if hasattr(response, "usage_metadata") and response.usage_metadata:
+                    cached = getattr(
+                        response.usage_metadata, "cached_content_token_count", 0
+                    )
+                    if cached:
+                        logger.info(
+                            "Cache hit: %d tokens served from implicit cache", cached
+                        )
+
+                return _parse_response_text(response)
+
+            except Exception as exc:
+                msg = str(exc)
+                last_exc = exc
+
+                # Rate limit — never retry
+                if _is_rate_limit(msg):
+                    raise LLMError(
+                        f"Gemini rate limit exceeded (429). "
+                        f"Wait before retrying. Original error: {msg}"
+                    ) from exc
+
+                # Transient 503 — retry with exponential backoff + jitter
+                if _is_transient(msg) and attempt < _MAX_RETRIES:
+                    base_delay = _BASE_BACKOFF * (2 ** (attempt - 1))
+                    jitter = base_delay * _JITTER_FRACTION
+                    delay = base_delay + random.uniform(-jitter, jitter)
+                    delay = max(0.5, delay)  # floor at 0.5 s
+                    logger.warning(
+                        "get_llm_response | transient 503 on %s attempt %d/%d "
+                        "— retrying in %.1fs",
+                        model,
+                        attempt,
+                        _MAX_RETRIES,
+                        delay,
+                    )
+                    time.sleep(delay)
+                    continue
+
+                # Non-transient error — fail immediately
+                raise LLMError(f"Gemini API call failed: {msg}") from exc
+
+        # Exhausted all retries on transient errors
+        raise LLMError(
+            f"{model} unavailable after {_MAX_RETRIES} attempts. Last error: {last_exc}"
+        ) from last_exc
+
+    # ── Primary model ─────────────────────────────────────────────────────────
+    try:
+        return _attempt_with_retries(MODEL)
+
+    except LLMError as primary_err:
+        msg = str(primary_err)
+
+        # Only attempt fallback on sustained transient failures, not rate limits
+        if not _is_transient(msg.lower()) and "unavailable after" not in msg:
+            raise
+
+        logger.warning(
+            "get_llm_response | %s exhausted — falling back to %s",
+            MODEL,
+            MODEL_FALLBACK,
+        )
+
+        try:
+            result = _attempt_with_retries(MODEL_FALLBACK)
+            logger.info("get_llm_response | fallback to %s succeeded", MODEL_FALLBACK)
+            return result
+
+        except LLMError as fallback_err:
+            # Both models failed — raise with combined context
+            raise LLMError(
+                f"Both {MODEL} and {MODEL_FALLBACK} unavailable. "
+                f"Primary: {primary_err}. Fallback: {fallback_err}"
+            ) from fallback_err

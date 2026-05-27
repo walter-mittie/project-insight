@@ -4,7 +4,7 @@ src/nl2sql.py
 F-08 · Chain-of-Thought NL2SQL Generation
 F-11 · Conversation History Management (Sprint 3)
 
-AM1: Agentic Conversational BI — Manu Mohandas / TCS
+Project Insight: Agentic Conversational BI 
 
 Provides the public function:
 
@@ -74,6 +74,19 @@ from src.llm import get_llm_response, load_schema_dict, LLMError
 logger = logging.getLogger(__name__)
 
 # ──────────────────────────────────────────────────────────────────────────────
+# CHART TYPE ANNOTATION  (ADR-042 — Option B)
+# ──────────────────────────────────────────────────────────────────────────────
+
+VALID_CHART_TYPES = {"bar", "line", "pie", "scatter", "table", "auto"}
+
+# Matches "CHART_TYPE: pie" at the start of a line; case-insensitive.
+# Anchored to \b to prevent partial matches (e.g. "scatter2" → rejected).
+_CHART_TYPE_PATTERN = re.compile(
+    r"^CHART_TYPE:\s*(bar|line|pie|scatter|table|auto)\b",
+    re.MULTILINE | re.IGNORECASE,
+)
+
+# ──────────────────────────────────────────────────────────────────────────────
 # CONVERSATION HISTORY CONFIG  (F-11)
 # ──────────────────────────────────────────────────────────────────────────────
 
@@ -94,6 +107,14 @@ COT_INSTRUCTION = """
 ## Your Task: Convert a natural language question into a DuckDB SQL query.
 
 Work through the following steps IN ORDER. Do not skip steps.
+
+### Step 0 — Resolve follow-up references
+If the user's question contains pronouns or implicit references 
+('their', 'those', 'these', 'that brand', 'same SKUs', 'them') 
+that refer to a prior result set, identify the prior turn's key column
+and values from the <conversation_history> block.
+Apply a WHERE <key_col> IN (...) filter using those exact values.
+Do NOT drop the filter — the user is asking about a specific subset.
 
 ### Step 1 — Identify tables and columns
 State which tables you need and which columns you will use.
@@ -171,6 +192,26 @@ Rules for the SQL block:
 
 Your reasoning (Steps 1–3) must appear BEFORE the ```sql block.
 The ```sql block is the only parseable output — keep it clean.
+
+### Step 5 — Suggest a chart type
+After the ```sql block, output a chart type annotation on its own line,
+exactly in this format:
+
+CHART_TYPE: <type>
+
+Where <type> is one of:
+- pie:     question asks about share, mix, split, proportion, composition,
+           or breakdown into parts (e.g. "what share", "portfolio mix",
+           "channel split", "% contribution")
+- scatter: question compares two numeric dimensions across entities
+           (e.g. "price vs volume", "spend vs uplift", "margin vs distribution")
+- line:    result is a time series — date, week, month, or quarter column present
+- bar:     rankings, comparisons, top-N by a single metric
+- table:   result has many columns, is inherently tabular, or the user asks
+           for a "list", "breakdown", or "detail"
+- auto:    when none of the above applies clearly
+
+Output Step 5 immediately after the closing ``` of the sql block.
 """.strip()
 
 
@@ -260,6 +301,25 @@ def _extract_reasoning(raw: str) -> str:
     return raw[:sql_start].strip()
 
 
+def _extract_chart_type(raw: str) -> str:
+    """
+    Extract the CHART_TYPE annotation from the Gemini response (ADR-042).
+
+    Looks for a line matching: CHART_TYPE: <type>
+    Expected to appear after the closing ``` of the sql block (Step 5).
+
+    Returns one of the six valid strings; defaults to "auto" if the
+    annotation is absent, malformed, or contains an unrecognised value.
+    Never raises.
+    """
+    match = _CHART_TYPE_PATTERN.search(raw)
+    if match:
+        value = match.group(1).lower()
+        if value in VALID_CHART_TYPES:
+            return value
+    return "auto"
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # PUBLIC FUNCTION
 # ──────────────────────────────────────────────────────────────────────────────
@@ -268,6 +328,7 @@ def _extract_reasoning(raw: str) -> str:
 def generate_sql(
     user_question: str,
     conversation_history: list[dict],
+    schema_override: str | None = None,
 ) -> dict:
     """
     Generate a DuckDB SQL query from a natural language question using
@@ -290,6 +351,11 @@ def generate_sql(
         Pass as [] on the first turn. agent.py builds and maintains this list.
         If len > MAX_HISTORY_TURNS (5), oldest turns are pruned here with a
         WARNING log (F-11 AC3).
+    schema_override : str | None, optional
+        If provided, replaces load_schema_dict() as the schema text injected
+        into the system prompt. Used by run_benchmark.py to implement the
+        baseline condition (stripped schema). Default None = normal treatment
+        path (full semantic data dictionary).
 
     Returns
     -------
@@ -331,12 +397,21 @@ def generate_sql(
         )
 
     # ── Build system prompt (schema → history → CoT instruction) ──────────────
-    schema_text = load_schema_dict()
+    schema_text = schema_override if schema_override is not None else load_schema_dict()
+    if schema_override is not None:
+        logger.info(
+            "generate_sql | BASELINE CONDITION: schema_override active (%d chars)",
+            len(schema_override),
+        )
     history_block = _format_conversation_history(conversation_history)
 
     if history_block:
         system_prompt = (
-            f"{schema_text}\n\n---\n\n{history_block}\n\n---\n\n{COT_INSTRUCTION}"
+            f"{schema_text}\n\n"
+            f"---\n\n"
+            f"{history_block}\n\n"
+            f"---\n\n"
+            f"{COT_INSTRUCTION}"
         )
         logger.info(
             "generate_sql | %d prior turn(s) injected into system prompt",
@@ -357,9 +432,9 @@ def generate_sql(
     except LLMError as exc:
         logger.error("LLMError in generate_sql: %s", exc)
         return {
-            "error": "llm_error",
+            "error":   "llm_error",
             "message": str(exc),
-            "raw": "",
+            "raw":     "",
         }
 
     # ── Extract SQL ────────────────────────────────────────────────────────────
@@ -372,19 +447,22 @@ def generate_sql(
         )
         return {
             "error": "no_sql_delimiter",
-            "raw": raw,
+            "raw":   raw,
         }
 
     reasoning = _extract_reasoning(raw)
+    suggested_chart_type = _extract_chart_type(raw)
 
     logger.info(
-        "generate_sql | SQL extracted (%d chars), reasoning (%d chars)",
+        "generate_sql | SQL extracted (%d chars), reasoning (%d chars), chart_type=%s",
         len(sql),
         len(reasoning),
+        suggested_chart_type,
     )
 
     return {
-        "reasoning": reasoning,
-        "sql": sql,
-        "raw": raw,
+        "reasoning":            reasoning,
+        "sql":                  sql,
+        "suggested_chart_type": suggested_chart_type,  # ADR-042
+        "raw":                  raw,
     }

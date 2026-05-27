@@ -1,6 +1,6 @@
 # Decision Log — Project Insight: Agentic Conversational BI
-**AM1 | BCS Level 7 AI Data Specialist | Manu Mohandas | TCS**
-Last updated: 2026-05-10
+By: Manu Mohandas
+Last updated: 2026-05-15
 
 ---
 
@@ -943,20 +943,6 @@ update requires only a document edit — no code change.
 - `src/nl2sql.py` (F-07, Sprint 2) — `SCHEMA_DICT_PATH` constant
 
 ---
-
-## Pending Decisions (Sprint 3 onwards)
-
-The following will be added as ADRs once decisions are made:
-
-- ADR-031 — Self-correction retry loop: 2 retries vs unlimited (Sprint 3)
-- ADR-032 — Streamlit session state management approach (Sprint 4)
-- ADR-033 — JSONL logging schema design (Sprint 4)
-- ADR-034 — Hypothesis test selection for Sprint 5 evaluation
-- ADR-035 — JSON vs. Chain of Thought Prompting (Sprint 2 Discussion)
-- ADR-036 — `docs/few_shot_examples.json` and a function to load it (Sprint 2 Discussion)
-
----
-
 ## Sprint 2 Decisions
 
 ---
@@ -1119,7 +1105,7 @@ in storage costs nothing and preserves the exact-grain lookup use case.
 ADR-027 initially selected `gemini-2.5-flash` on the Google AI Studio free tier.
 During Sprint 2 integration, the actual account-level free-tier quota was
 discovered to be **20 RPD** (requests per day) — far below the 1,500 RPD
-widely reported in third-party documentation as of April 2026.  At 20 RPD,
+widely reported in third-party documentation as of January 2026.  At 20 RPD,
 the 15-query manual test suite (F-08 AC3) cannot be executed and iterated
 upon in the same day, and Sprint 5 evaluation (estimated 300+ queries across
 multiple prompt versions) would require 15+ calendar days on the free tier.
@@ -1144,7 +1130,7 @@ output tokens, 10,000 RPD, 1,000 RPM, 1,000,000 TPM.
 - Cons: introduces a cost dependency; requires billing account setup
 
 **Decision**
-Option B — paid tier with a **$5.00 monthly budget cap**.
+Option B — paid tier with a **$10.00 monthly budget cap**.
 
 **Cost analysis**
 Estimated per-request input: ~3,500 tokens (schema ~2,600 + CoT instruction
@@ -1161,7 +1147,7 @@ on Gemini 2.5 Flash with 1,024-token minimum — schema exceeds this at ~2,600
 tokens; architecture already follows static-first prompt ordering per ADR-028):
   Total: ~$1.35
 
-$5.00 cap provides 3× safety margin over worst-case uncached estimate.
+$10.00 cap provides 6× safety margin over worst-case uncached estimate.
 
 **Rationale**
 At $1.68 total estimated cost, the paid tier is cheaper than the engineering
@@ -1184,7 +1170,7 @@ No code changes are required — caching is automatic on Google's backend.
 
 **KSB mapping** K1, K13, S15, S25
 **Implementation**
-- Google Cloud billing: $5.00 monthly budget cap set in billing console
+- Google Cloud billing: $10.00 monthly budget cap set in billing console
 - `src/llm.py` → `MODEL` constant unchanged (`gemini-2.5-flash`)
 - ADR-027 amended with cross-reference to this ADR
 
@@ -1230,7 +1216,7 @@ representable in the schema — and additional retries will not help.
 Cost impact on Sprint 5 evaluation: if 10% of 300 benchmark queries require one
 retry and 2% require two, total overhead is approximately 14% additional API calls
 (~42 extra calls).  At $0.30/M input tokens + $2.50/M output tokens this is
-approximately $0.06 above the baseline estimate — within the $5.00 monthly cap.
+approximately $0.06 above the baseline estimate — within the $10.00 monthly cap.
 The uncapped alternative would make Sprint 5 API cost unquantifiable, undermining
 the project's reproducibility.
 
@@ -1252,7 +1238,7 @@ the project's reproducibility.
 ### ADR-037 — is_volume_outlier exclusion extended to revenue KPIs in schema flag table
 
 **Context**
-The 15-query manual test suite (F-08 AC3, run 2026-05-09) revealed that the
+The 15-query manual test suite (F-08 AC3, run 2026-01-16) revealed that the
 LLM inconsistently applied `is_volume_outlier = FALSE` to revenue aggregations.
 In Q08 and Q10 the model excluded outlier rows from net_revenue_gbp calculations
 with the reasoning "net_revenue is derived from volume_units, so exclude for
@@ -1394,60 +1380,319 @@ in FMCG panel data from Nielsen/Kantar).
 
 ---
 
-### ADR-040 — Orchestration layer: agent.py as single entry point
+### ADR-040 — agent.py as single orchestration entry point
 
 **Context**
-Sprint 3 introduces three tightly coupled features: the self-correction retry
-loop (F-10), conversation history management (F-11), and narrative generation
-(F-12).  These features must be composed together — retry affects which SQL
-reaches narrative; history is appended only after a successful execution.
-A decision was required on where to locate this orchestration logic.
-
-Two options were considered:
-
-Option A — Embed orchestration in nl2sql.py: extend generate_sql() to call
-executor.py and handle retries internally.
-- Rejected: violates the Sprint 2 frozen interface (generate_sql signature
-  cannot change); conflates SQL generation with execution and narrative, making
-  the module responsible for three distinct concerns; makes unit-testing the
-  retry loop impossible without mocking the LLM.
-
-Option B — New src/agent.py module with a single public function run_turn():
-- Exposes: run_turn(user_question, conversation_history, conn) -> dict
-- Internally calls: generate_sql → execute_sql → [retry loop] → generate_narrative
-- Appends the completed turn to conversation_history before returning.
-- Sprint 4 (Streamlit UI) calls run_turn() as its single backend entry point.
+Sprints 1–2 produced independent modules: `nl2sql.py` (SQL generation),
+`executor.py` (DuckDB execution), `narrative.py` (result interpretation).
+Sprint 3 required wiring these into a single agentic loop with retry logic
+and conversation history management. Two architectural options were evaluated:
+Option A — embed the orchestration loop in `nl2sql.py`; Option B — introduce
+a new `src/agent.py` module exposing a single public function `run_turn()`.
 
 **Decision**
-Option B — new src/agent.py with run_turn() as the single public function.
+Option B — new `src/agent.py` with `run_turn(user_question, conversation_history, conn) -> dict`
+as the single public entry point.
 
 **Rationale**
-The agent.py boundary cleanly separates concerns: nl2sql.py generates SQL,
-executor.py runs it, narrative.py interprets results, agent.py orchestrates
-the loop.  This mapping is one-to-one with the F-10/F-11/F-12 feature
-boundaries, making each module independently testable.  The retry loop in
-agent.py can be unit-tested by mocking execute_sql() to return deliberate
-CatalogException errors without any LLM API calls.  Sprint 4 benefits from
-a single, stable entry point: the Streamlit UI has no visibility of retry
-logic, history truncation, or narrative prompting — it calls run_turn() and
-receives a unified response dict.  The architecture also enforces the ADR-002
-principle of FK coupling at the right layer: NL2SQL and execution are coupled
-to each other via agent.py, not to narrative generation.
+The `agent.py` boundary cleanly separates concerns: `nl2sql.py` generates SQL,
+`executor.py` runs it, `narrative.py` interprets results, `agent.py` orchestrates
+the loop. This mapping is one-to-one with the F-10/F-11/F-12 feature boundaries,
+making each module independently testable — the retry loop can be unit-tested
+by mocking `execute_sql()` to return deliberate `CatalogException` errors without
+any LLM API calls. Sprint 4 benefits from a single, stable entry point: the
+Streamlit UI has no visibility of retry logic, history truncation, or narrative
+prompting — it calls `run_turn()` and receives a unified response dict. The
+architecture also enforces correct layer separation: NL2SQL and execution are
+coupled to each other via `agent.py`, not to narrative generation or UI code.
 
 **Alternatives considered**
-- Embed in nl2sql.py: rejected — breaks frozen Sprint 2 interface; violates
+- Embed in `nl2sql.py`: rejected — breaks frozen Sprint 2 interface; violates
   single responsibility principle; complicates unit testing
-- Embed in narrative.py: rejected — misleading name for a god-module; narrative
-  is a post-execution concern and should not own execution logic
-- No orchestration module (wire everything in Streamlit): rejected — moves
-  business logic into the UI layer; makes Sprint 5 evaluation harder to isolate
+- Embed in `narrative.py`: rejected — misleading name for an orchestration module;
+  narrative is a post-execution concern and should not own execution logic
+- Wire everything in Streamlit: rejected — moves business logic into the UI layer;
+  makes Sprint 5 benchmark evaluation harder to isolate from UI state
 
 **KSB mapping** K1, K5, S7, S15, K26
 **Implementation**
-- `src/agent.py` — run_turn(user_question, conversation_history, conn) -> dict
-- `src/narrative.py` — generate_narrative(user_question, df) -> dict (called by agent.py)
-- Sprint 4: Streamlit calls agent.run_turn() exclusively
+- `src/agent.py` — `run_turn()` as sole public function
+- `src/narrative.py` — called by `agent.py` post-execution
+- `app.py` (Sprint 4) — calls `agent.run_turn()` exclusively; no direct access to
+  `nl2sql.py`, `executor.py`, or `narrative.py`
 
 ---
+## Sprint 4 Decisions
+
+---
+
+### ADR-032 — Streamlit session state management: dict-based turns list
+
+**Context**
+Sprint 4 (F-13) required a Streamlit session state design that could hold the
+growing conversation thread, support chart/table toggle preferences per turn,
+and enable the three-state session resumption model (Pending / Running / Complete).
+Three options were evaluated: (A) a flat list of turn dicts in `st.session_state.turns`;
+(B) separate parallel lists per field (questions, responses, chart types); (C)
+a SQLite-backed state store.
+
+**Decision**
+Option A — a single `st.session_state.turns` list of dicts, one dict per completed
+turn. Each dict carries all response fields from `run_turn()` plus UI-layer fields
+(`chart_pref`, `resolved_chart_type`). Companion key `st.session_state.history`
+holds the conversation history list passed to `run_turn()`.
+
+**Rationale**
+A single list of turn dicts is the natural match for the JSONL log structure —
+each dict in `turns` has the same shape as one JSONL entry, making render and
+log-write loops identical in structure. Parallel lists require index-synchronised
+access that becomes fragile under conditional append logic (e.g. failed turns are
+not appended to `turns` or `history`). SQLite is overengineered for a prototype
+with a session lifetime of minutes to hours; state does not need to persist beyond
+the Streamlit process. The `chart_pref` field added to each turn dict cleanly
+implements the per-card toggle preference without global state.
+
+**Alternatives considered**
+- Parallel lists: rejected — index synchronisation is fragile; conditional
+  append logic (error turns skipped) would desynchronise indices
+- SQLite-backed state: rejected — adds a dependency and write-latency for a
+  prototype that doesn't need durable within-session state
+- Pydantic models: considered but deferred — adds type safety but complicates
+  JSON serialisation; not required for prototype scope
+
+**KSB mapping** K1, K6, S15, S24
+**Implementation**
+- `app.py` — `_init_session_state()`: initialises `st.session_state.turns`,
+  `st.session_state.history`, `st.session_state.session_id`, and restore-state flags
+- `app.py` — `handle_question()`: appends to `turns` and `history` on success only
+
+---
+
+### ADR-041 — JSONL logging schema: 16-field design
+
+**Context**
+The original F-15 acceptance criteria specified a 9-field JSONL log:
+`turn_id`, `timestamp`, `user_query`, `generated_sql`, `execution_time_ms`,
+`retry_count`, `row_count`, `success_flag`, `narrative_generated`.
+During Sprint 4 build, two requirements emerged that necessitated schema
+expansion: (1) session resumption (F-13) requires `session_id`, `resumed`,
+and `resumed_at` to distinguish original from replayed turns; (2) the
+Sprint 5 evaluation metrics (F-18) require `history_truncated`, `error_stage`,
+`suggested_chart_type`, and `rendered_chart_type` to compute all defined metrics
+from logs alone, without additional instrumentation. Expanding the schema now
+avoids a breaking schema change mid-Sprint 5 evaluation.
+
+**Decision**
+Expand the JSONL schema to 16 fields: the original 9 plus `session_id`,
+`history_truncated`, `error_stage`, `resumed`, `resumed_at` (5 operational
+fields) plus `suggested_chart_type` and `rendered_chart_type` (2 ADR-042
+chart audit fields). `raw_nl2sql` and `raw_narrative` payloads are
+intentionally excluded — they are large, redundant with the rendered
+outputs, and would inflate the log file size by approximately 10× per turn.
+
+**Rationale**
+The 5 operational additions are individually necessary: `session_id` is
+required for `load_past_sessions()` and `read_turns_from_jsonl()` to function;
+`resumed` / `resumed_at` enable restored turns to be excluded from Sprint 5
+metrics (which should measure original queries only); `history_truncated`
+provides a signal for diagnosing context-window edge cases; `error_stage`
+enables failure mode categorisation in F-18 without parsing narrative text.
+The 2 chart audit fields (`suggested_chart_type`, `rendered_chart_type`) are
+a direct requirement of ADR-042 — logging both enables the chart type accuracy
+metric (F-18 AC5) and provides evidence for the ADR-042 design decision in
+the AM1 report. The exclusion of raw LLM payloads follows the principle that
+logs should contain rendered outputs, not intermediate artefacts; the payloads
+are already discarded from `st.session_state`.
+
+**Alternatives considered**
+- Log only the original 9 fields: rejected — `session_id` absence makes
+  multi-session JSONL unqueryable; `error_stage` absence requires manual
+  parsing to categorise failures in F-18
+- Log all fields including `raw_nl2sql` and `raw_narrative`: rejected — adds
+  approximately 2,000–5,000 tokens per turn to the log file; the payloads
+  add no value for Sprint 5 metrics and are not referenced in evaluation scripts
+- Use a relational DB (SQLite) for logging: rejected — JSONL is append-only,
+  schema-free, and directly parseable with `json.loads()`; SQLite would require
+  schema migration tooling and adds a dependency
+
+**KSB mapping** K6, K23, S17, S24
+**Implementation**
+- `src/logger.py` — `log_turn()`: writes all 16 fields; `LogWriteError` raised
+  on write failure (not propagated as unhandled exception)
+- `src/logger.py` — `load_past_sessions()`, `read_turns_from_jsonl()`: read from
+  the 16-field schema
+- `tests/sprint4_validation.py` §1: 13 automated tests covering all log fields,
+  error handling, session grouping, ordering, and filtering
+
+---
+
+### ADR-042 — Chart type resolution: three-level priority chain
+
+**Context**
+Sprint 4 (F-13) required a mechanism to select the appropriate chart type for
+each query result. Three signal sources were available: (P1) explicit chart type
+keywords in the user's question (`'pie chart'`, `'vs '`, `'weekly'`); (P2) Gemini's
+annotation of the intended chart type embedded in the NL2SQL response (`CHART_TYPE:`
+directive, parsed by `_extract_chart_type()` in `nl2sql.py`); (P3) the shape of the
+returned DataFrame (number and type of columns). A design decision was required on
+priority ordering when signals conflict.
+
+**Decision**
+Three-level priority chain, implemented in `resolve_chart_type(question, suggested, df)`:
+- **P1 — Prompt keyword (highest priority):** if `_keyword_hint(question)` returns a
+  non-None type, use it. The user explicitly named a chart type; override everything else.
+- **P2 — Gemini annotation:** if `suggested_chart_type != 'auto'`, use it. The model
+  inferred chart intent from the query semantics.
+- **P3 — DataFrame heuristic:** if neither signal is present, infer from column shape:
+  ≥2 numeric + ≥1 categorical → scatter; 1 numeric + 1 temporal categorical → line;
+  1 numeric + 1 categorical → bar; else → table.
+- **P4 — Default:** `'bar'` when heuristic returns `'table'` (heuristic cannot classify).
+
+Both `suggested_chart_type` (P2 input) and `rendered_chart_type` (final output) are
+logged in the JSONL entry (ADR-041) to support Sprint 5 chart accuracy evaluation.
+
+**Rationale**
+P1 > P2 > P3 maps to increasing uncertainty about user intent. Explicit keyword
+utterance is the strongest possible signal — the user typed `'as a pie chart'`.
+Gemini annotation is next: the model has read the full question and schema context
+and made a semantic inference. The DataFrame heuristic is purely structural — it
+has no access to the question semantics — so it ranks below model inference.
+The default `'bar'` is appropriate when no signal exists because bar charts are
+the most universally interpretable chart type for tabular FMCG data.
+
+**Post-implementation finding (2026-02-04):** Sprint 4 validation revealed that
+`'top '` (with trailing space) in `PROMPT_KEYWORDS['bar']` fires P1 on all standard
+FMCG ranking queries (`'Top brands by…'`, `'Top 5 SKUs…'`), overriding P2 even when
+Gemini correctly annotated a different type. This is addressed by ADR-043.
+
+**Alternatives considered**
+- P2 > P1 > P3 (Gemini first): rejected — if the user explicitly types `'pie chart'`,
+  overriding it with Gemini's inference is confusing and non-transparent
+- Heuristic only (no Gemini annotation): rejected — wastes the available semantic
+  signal from the model; heuristic has no access to question intent
+- P3 > P2 > P1: rejected — DataFrame shape contains no information about user
+  intent; ranking it above model inference is indefensible
+
+**KSB mapping** K1, K5, S15, K26
+**Implementation**
+- `app.py` — `PROMPT_KEYWORDS` dict, `_keyword_hint()`, `_heuristic()`,
+  `resolve_chart_type()`, `render_bar()`, `render_line()`, `render_pie()`,
+  `render_scatter()`
+- `src/nl2sql.py` — `VALID_CHART_TYPES`, `_extract_chart_type()`, `CHART_TYPE:`
+  directive in the NL2SQL system prompt
+- `src/logger.py` — `suggested_chart_type` and `rendered_chart_type` fields (ADR-041)
+- `tests/sprint4_validation.py` §2–4: 38 automated tests covering priority chain,
+  heuristic rules, and render fallback behaviour
+
+---
+
+### ADR-043 — PROMPT_KEYWORDS['bar']: remove 'top ' keyword
+
+**Context**
+Sprint 4 validation (`tests/sprint4_validation.py`) revealed that `'top '`
+(keyword with trailing space) in `PROMPT_KEYWORDS['bar']` caused `_keyword_hint()`
+to return `'bar'` for every query beginning with `'Top N…'` — the dominant pattern
+in FMCG ranking queries (`'Top brands by net revenue'`, `'Top 5 SKUs by volume'`,
+`'Top retailers by share'`). This made P1 (keyword) override P2 (Gemini) for all
+ranking queries, even when Gemini correctly annotated a different chart type (e.g.
+`'pie'` for a share distribution query phrased as `'Top brands by share…'`).
+Three validation test cases failed as a result: RCT-04, RCT-06, RCT-08.
+
+**Decision**
+Remove `'top '` from `PROMPT_KEYWORDS['bar']`. The updated list is:
+`['bar chart', 'bar graph', 'column chart', 'ranking', 'compare', 'comparison']`.
+
+**Rationale**
+`'top '` is a **content word** indicating a ranking query, not a **chart type
+keyword** indicating the user's explicit visualisation preference. A user asking
+`'Top brands by net revenue'` is asking about rankings — they have not indicated
+whether they want a bar, line, or pie chart. Gemini's annotation (P2) or the
+DataFrame heuristic (P3) are more reliable signals for this query class.
+Removing `'top '` restores the intended P1 > P2 > P3 priority ordering for
+ranking queries. Explicit bar chart requests (`'show me a bar chart of top brands'`)
+still resolve correctly via the `'bar chart'` keyword.
+
+The corresponding `_make_subtitle()` fix (adding `' as a pie chart'`, `' as a scatter
+plot'`, `' as a scatter'` to the strip list) is a companion change — not a separate
+architectural decision — and is applied alongside this ADR.
+
+**Alternatives considered**
+- Keep `'top '` and accept P1 override on ranking queries: rejected — Gemini's
+  chart annotation provides higher-quality signal for this query class; the
+  override was masking ADR-042's P2 priority layer entirely for a major query pattern
+- Replace `'top '` with `'top N '` (regex matching a number): rejected — still
+  fires on `'Top brands…'` without a number; adds complexity for marginal gain
+- Add `'top '` back for explicit ranking visualisation: deferred — if evidence
+  from Sprint 5 evaluation shows users explicitly want bar charts for ranking
+  queries, a more targeted keyword (e.g. `'bar ranking'`) can be reintroduced
+
+**KSB mapping** K1, S15, K26
+**Implementation**
+- `app.py` — `PROMPT_KEYWORDS['bar']`: remove `'top '` entry
+- `app.py` — `_make_subtitle()`: add `' as a pie chart'`, `' as a scatter plot'`,
+  `' as a scatter'` to the suffix strip list
+- After fix: `python tests/sprint4_validation.py` must pass 51/51
+
+---
+### ADR-044 — MODEL_FALLBACK chain: gemini-2.5-pro (updated from gemini-1.5-flash)
+
+**Context**
+`src/llm.py` originally specified `MODEL_FALLBACK = "gemini-1.5-flash"` per ADR-027.
+During Sprint 4 development, the fallback was updated to `"gemini-2.5-pro"` to ensure
+the fallback model has equivalent or greater capability than the primary. The free-tier
+capacity constraint (20 RPD actual vs 1,500 published for gemini-2.5-flash) was
+encountered during Sprint 5 benchmark execution, confirming that rate limits are a
+real project risk.
+
+**Decision**
+`MODEL_FALLBACK = "gemini-2.5-pro"` (current value in `src/llm.py`).
+Free-tier capacity constraint documented as a project risk: sustained evaluation
+runs (40+ API calls) require paid-tier access or significant time distribution.
+
+**Alternatives considered**
+- `gemini-1.5-flash` (original): retired model; lower capability than primary. Rejected.
+- `gemini-2.5-flash-lite`: lighter variant; acceptable latency but less reliable on complex
+  multi-table SQL. Rejected in favour of a higher-capability fallback.
+
+**Rationale**
+Fallback to a more capable model (2.5 Pro) ensures that transient primary model
+failures degrade gracefully to a higher-quality path rather than a lower-quality one.
+The risk of fallback producing unexpectedly verbose or differently-structured outputs
+is mitigated by the shared Gemini 2.x prompt format.
+
+**KSB mapping** K13, S15
+
+**Implementation**
+`src/llm.py` — `MODEL_FALLBACK = "gemini-2.5-pro"` constant.
+
+---
+
+## Updated Pending Decisions
+
+> Replace the existing "Pending Decisions (Sprint 3 onwards)" block with this.
+
+The following decisions remain pending:
+
+- **ADR-034** — Hypothesis test selection for Sprint 5 evaluation: choice of
+  statistical test (Fisher's exact test vs chi-squared vs proportion z-test) for
+  comparing baseline and treatment correctness rates across 20 benchmark prompts.
+  To be decided at Sprint 5 start once final prompt count is confirmed.
+
+Previously pending decisions now resolved:
+
+| ADR     | Subject                                           | Resolution                                                                                                                                                                                                                                                                                                    |
+| ------- | ------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| ADR-031 | Self-correction retry loop: max retries           | Written — 2 retries (Sprint 3)                                                                                                                                                                                                                                                                                |
+| ADR-032 | Streamlit session state management                | Written — dict-based turns list (Sprint 4)                                                                                                                                                                                                                                                                    |
+| ADR-033 | JSONL logging schema design                       | Superseded by ADR-041 (Sprint 4)                                                                                                                                                                                                                                                                              |
+| ADR-035 | JSON vs Chain-of-Thought prompting                | Resolved — CoT chosen in Sprint 2 (F-08 AC1); JSON output format rejected because it constrains the model's step-by-step reasoning and makes the SQL block harder to extract reliably. No separate ADR written; decision captured in F-08 problem statement.                                                  |
+| ADR-036 | `docs/few_shot_examples.json` and loader function | Deferred — not built in prototype scope. Schema RAG (ADR-028) plus CoT instruction (F-08) provided sufficient grounding. Few-shot examples would add ~2,000 tokens per call; deferred to post-prototype if correctness rates in Sprint 5 are below threshold. Documented as future enhancement in AM1 report. |
+| ADR-040 | agent.py as single orchestration entry point      | Written — Sprint 3                                                                                                                                                                                                                                                                                            |
+| ADR-041 | JSONL 16-field logging schema                     | Written — Sprint 4                                                                                                                                                                                                                                                                                            |
+| ADR-042 | Chart type resolution: three-level priority chain | Written — Sprint 4                                                                                                                                                                                                                                                                                            |
+| ADR-043 | PROMPT_KEYWORDS 'top ' removal                    | Written — Sprint 4                                                                                                                                                                                                                                                                                            |
+
+---
+
 
 *End of decision log. Maintained incrementally — one ADR per decision, at point of decision.*

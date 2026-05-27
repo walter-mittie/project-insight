@@ -1,13 +1,5 @@
----
-feature: F-04
-version: 1.2
-last_updated: 2026-05-10
-source_layer: data/processed/
-tables: dim_product · dim_customer · fact_sales · fact_market
----
-
 # Schema & Semantic Data Dictionary
-## FMCG Analytics — Processed Layer
+## Project Insight : Agentic Conversational BI
 
 All tables are DuckDB-queryable Parquet files in `data/processed/`.
 This is the **only** layer the application queries. Raw and QI-injected

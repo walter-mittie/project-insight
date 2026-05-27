@@ -1,0 +1,826 @@
+﻿benchmark_id,tier,condition,sql_generated,exec_success,retry_count,exec_time_ms,suggested_chart_type,sql_correct,failure_mode
+Q01,1,baseline,"SELECT
+    COUNT(DISTINCT product_id) AS distinct_skus_sold
+FROM
+    fact_sales
+WHERE
+    year = 2024
+    AND quarter = 1;",1,0,43.1,auto,1,
+Q01,1,treatment,"SELECT
+    COUNT(DISTINCT product_id) AS distinct_skus_sold
+FROM
+    fact_sales
+WHERE
+    year = 2024
+    AND quarter = 1
+    AND is_zero_price = FALSE
+    AND is_volume_outlier = FALSE;",1,0,34.4,auto,0,FP-02
+Q02,1,baseline,"SELECT
+  dp.sku_name,
+  SUM(fs.net_revenue_gbp) AS total_net_revenue
+FROM fact_sales AS fs
+JOIN dim_product AS dp
+  ON fs.product_id = dp.product_id
+WHERE
+  fs.year = 2025 AND dp.is_active = TRUE AND fs.is_volume_outlier = FALSE AND fs.is_zero_price = FALSE
+GROUP BY
+  dp.sku_name
+ORDER BY
+  total_net_revenue DESC
+LIMIT 10;",1,0,70.8,bar,1,
+Q02,1,treatment,"SELECT
+    dp.sku_name,
+    SUM(fs.net_revenue_gbp) AS total_net_revenue_gbp
+FROM
+    fact_sales AS fs
+JOIN
+    dim_product AS dp ON fs.product_id = dp.product_id
+WHERE
+    fs.year = 2025
+    AND dp.is_active = TRUE
+    AND fs.is_zero_price = FALSE
+    AND fs.is_volume_outlier = FALSE
+GROUP BY
+    dp.sku_name
+ORDER BY
+    total_net_revenue_gbp DESC
+LIMIT 10;",1,0,56.3,bar,1,
+Q03,1,baseline,,0,0,,auto,0,NO SQL
+Q03,1,treatment,"SELECT
+    SUM(incremental_volume) AS total_incremental_volume_2024
+FROM fact_sales
+WHERE year              = 2024
+  AND is_promoted       = TRUE
+  AND is_volume_outlier = FALSE;",1,0,36.7,bar,1,
+Q04,2,baseline,"SELECT
+  dc.channel,
+  SUM(fs.gross_revenue_gbp) AS total_gross_revenue_gbp,
+  SUM(fs.trade_discount_gbp) AS total_trade_discount_gbp
+FROM fact_sales AS fs
+JOIN dim_customer AS dc
+  ON fs.customer_id = dc.customer_id
+WHERE
+  fs.year = 2025 AND fs.is_zero_price = FALSE AND fs.is_volume_outlier = FALSE
+GROUP BY
+  dc.channel;",1,0,66.6,bar,1,
+Q04,2,treatment,"SELECT
+    dc.channel,
+    SUM(fs.gross_revenue_gbp)    AS total_gross_revenue_gbp,
+    SUM(fs.trade_discount_gbp)   AS total_trade_discount_gbp
+FROM fact_sales fs
+JOIN dim_customer dc ON fs.customer_id = dc.customer_id
+WHERE fs.year              = 2025
+  AND fs.is_zero_price     = FALSE
+  AND fs.is_volume_outlier = FALSE
+GROUP BY dc.channel
+ORDER BY total_gross_revenue_gbp DESC;",1,0,71.1,bar,1,
+Q05,2,baseline,"SELECT
+    quarter,
+    SUM(brand_volume_units) * 100.0 / SUM(total_category_volume_units) AS nitroboost_volume_market_share_pct
+FROM
+    fact_market
+WHERE
+    brand = 'NitroBoost'
+    AND year = 2024
+GROUP BY
+    quarter
+ORDER BY
+    quarter;",1,0,11.9,bar,0,FP-02
+Q05,2,treatment,"SELECT
+    year,
+    quarter,
+    brand,
+    ROUND(SUM(brand_volume_units) * 100.0
+          / NULLIF(SUM(total_category_volume_units), 0), 2) AS market_share_volume_pct
+FROM fact_market
+WHERE brand            = 'NitroBoost'
+  AND year             = 2024
+  AND is_vol_violation = FALSE
+GROUP BY year, quarter, brand
+ORDER BY year, quarter;",1,0,7.6,auto,1,
+Q06,2,baseline,"WITH filtered_market_data AS (
+    SELECT
+        fm.week_date,
+        fm.brand,
+        fm.sub_category,
+        fm.banner, -- Corrected column name from 'banner_name' to 'banner'
+        fm.brand_value_gbp,
+        fm.brand_volume_units,
+        fm.total_category_value_gbp,
+        fm.total_category_volume_units
+    FROM fact_market AS fm
+    JOIN (SELECT DISTINCT brand, sub_category, category FROM dim_product) AS dp_filtered
+        ON fm.brand = dp_filtered.brand AND fm.sub_category = dp_filtered.sub_category
+    WHERE
+        fm.year = 2025
+        AND dp_filtered.category = 'Dairy'
+        AND fm.is_vol_violation = FALSE
+        AND fm.is_zero_shelf_price = FALSE
+),
+dairy_category_numerator AS (
+    -- Aggregated value and volume for all brands within the Dairy category (numerator of P4)
+    SELECT
+        SUM(brand_value_gbp) AS dairy_category_total_value,
+        SUM(brand_volume_units) AS dairy_category_total_volume
+    FROM filtered_market_data
+),
+dairy_sub_category_market_denominator AS (
+    -- Aggregated total market value and volume for all sub-categories belonging to Dairy (denominator of P4)
+    -- Select DISTINCT (week_date, sub_category, banner) to avoid overcounting total_category_value/volume_units
+    SELECT
+        SUM(total_category_value_gbp) AS dairy_sub_category_market_total_value,
+        SUM(total_category_volume_units) AS dairy_sub_category_market_total_volume
+    FROM (
+        SELECT DISTINCT
+            week_date,
+            sub_category,
+            banner,
+            total_category_value_gbp,
+            total_category_volume_units
+        FROM filtered_market_data
+    ) AS distinct_sub_category_market_data
+)
+SELECT
+    -- Calculate Price Index using the P4 pattern
+    ROUND(
+        (dc_num.dairy_category_total_value / NULLIF(dc_num.dairy_category_total_volume, 0)) /
+        (dscm_den.dairy_sub_category_market_total_value / NULLIF(dscm_den.dairy_sub_category_market_total_volume, 0)) * 100
+    , 2) AS dairy_category_price_index_2025
+FROM
+    dairy_category_numerator AS dc_num,
+    dairy_sub_category_market_denominator AS dscm_den;",1,1,18.7,table,1,
+Q06,2,treatment,"WITH product_categories AS (
+    SELECT DISTINCT
+        brand,
+        sub_category,
+        category
+    FROM dim_product
+)
+SELECT
+    pc.category,
+    ROUND(
+        (SUM(fm.brand_value_gbp) * 1.0 / NULLIF(SUM(fm.brand_volume_units), 0)) /
+        (SUM(fm.total_category_value_gbp) * 1.0 / NULLIF(SUM(fm.total_category_volume_units), 0))
+        * 100, 2
+    ) AS price_index
+FROM fact_market fm
+JOIN product_categories pc
+    ON fm.brand        = pc.brand
+    AND fm.sub_category = pc.sub_category
+WHERE fm.year                 = 2025
+  AND pc.category             = 'Dairy'
+  AND fm.is_vol_violation     = FALSE
+  AND fm.is_zero_shelf_price  = FALSE
+GROUP BY pc.category;",1,0,13.2,table,1,
+Q07,3,baseline,"SELECT
+    dc.region,
+    dp.category,
+    SUM(fs.net_revenue_gbp) AS total_net_revenue_gbp
+FROM
+    fact_sales AS fs
+JOIN
+    dim_product AS dp
+    ON fs.product_id = dp.product_id
+JOIN
+    dim_customer AS dc
+    ON fs.customer_id = dc.customer_id
+WHERE
+    fs.year = 2025
+    AND fs.quarter = 4
+    AND fs.is_zero_price = FALSE
+    AND fs.is_volume_outlier = FALSE
+GROUP BY
+    dc.region,
+    dp.category
+ORDER BY
+    dc.region,
+    dp.category;",1,0,63.2,bar,1,
+Q07,3,treatment,"SELECT
+    dc.region,
+    dp.category,
+    SUM(fs.net_revenue_gbp) AS total_net_revenue_gbp
+FROM fact_sales fs
+JOIN dim_product dp
+    ON fs.product_id = dp.product_id
+JOIN dim_customer dc
+    ON fs.customer_id = dc.customer_id
+WHERE fs.year = 2025
+  AND fs.quarter = 4
+  AND fs.is_zero_price = FALSE
+  AND fs.is_volume_outlier = FALSE
+GROUP BY
+    dc.region,
+    dp.category
+ORDER BY
+    dc.region,
+    dp.category;",1,0,63.3,auto,1,
+Q08,3,baseline,"WITH customer_channel_filter AS (
+    -- Select distinct banner names associated with the 'Grocery' channel
+    -- This ensures that fact_market data is correctly filtered for 'Grocery' banners
+    SELECT DISTINCT
+        banner
+    FROM
+        dim_customer
+    WHERE
+        channel = 'Grocery'
+),
+sales_aggregated AS (
+    -- Aggregate fact_sales to the brand, week_date, and banner level
+    -- Apply relevant filters and exclusions
+    SELECT
+        dp.brand,
+        fs.week_date,
+        dc.banner,
+        SUM(fs.net_revenue_gbp) AS net_revenue_gbp
+    FROM
+        fact_sales AS fs
+    JOIN
+        dim_product AS dp
+        ON fs.product_id = dp.product_id
+    JOIN
+        dim_customer AS dc
+        ON fs.customer_id = dc.customer_id
+    WHERE
+        fs.year = 2025
+        AND dc.channel = 'Grocery' -- Filter for 'Grocery' channel
+        AND fs.is_zero_price = FALSE
+        AND fs.is_volume_outlier = FALSE
+    GROUP BY
+        dp.brand,
+        fs.week_date,
+        dc.banner
+),
+market_aggregated AS (
+    -- Aggregate fact_market to the brand, week_date, and banner level
+    -- Apply channel filter using the customer_channel_filter CTE
+    SELECT
+        fm.brand,
+        fm.week_date,
+        fm.banner,
+        SUM(fm.brand_volume_units) AS brand_volume_units,
+        SUM(fm.total_category_volume_units) AS total_category_volume_units
+    FROM
+        fact_market AS fm
+    JOIN
+        customer_channel_filter AS ccf
+        ON fm.banner = ccf.banner
+    WHERE
+        fm.year = 2025
+        AND fm.is_vol_violation = FALSE -- Exclude rows with volume violations for market share calculation
+    GROUP BY
+        fm.brand,
+        fm.week_date,
+        fm.banner
+)
+-- Final aggregation: join the pre-aggregated sales and market data
+-- and calculate the final net revenue and volume market share by brand
+SELECT
+    sa.brand,
+    SUM(sa.net_revenue_gbp) AS total_net_revenue_gbp,
+    (SUM(ma.brand_volume_units) * 100.0 / NULLIF(SUM(ma.total_category_volume_units), 0)) AS volume_market_share_pct
+FROM
+    sales_aggregated AS sa
+JOIN
+    market_aggregated AS ma
+    ON sa.brand = ma.brand
+    AND sa.week_date = ma.week_date
+    AND sa.banner = ma.banner
+GROUP BY
+    sa.brand
+ORDER BY
+    total_net_revenue_gbp DESC;",1,1,77.1,bar,1,
+Q08,3,treatment,"WITH banner_channel_map AS (
+    -- Create a distinct mapping of banner to channel to avoid fan-out when joining to fact_market
+    SELECT DISTINCT
+        banner,
+        channel
+    FROM dim_customer
+    WHERE channel = 'Grocery'
+),
+sales_agg AS (
+    -- Aggregate fact_sales to brand x banner x week_date for Grocery channel in 2025
+    SELECT
+        fs.week_date,
+        dp.brand,
+        dc.banner,
+        SUM(fs.net_revenue_gbp) AS net_revenue_gbp,
+        SUM(fs.volume_units) AS volume_units -- Included in sales_agg for completeness, though not directly used in final SELECT
+    FROM fact_sales fs
+    JOIN dim_product dp ON fs.product_id = dp.product_id
+    JOIN dim_customer dc ON fs.customer_id = dc.customer_id
+    WHERE fs.is_zero_price = FALSE
+      AND fs.is_volume_outlier = FALSE
+      AND dc.channel = 'Grocery'
+      AND fs.year = 2025
+    GROUP BY fs.week_date, dp.brand, dc.banner
+),
+market_agg AS (
+    -- Aggregate fact_market to brand x banner x week_date for Grocery channel in 2025
+    SELECT
+        fm.week_date,
+        fm.brand,
+        fm.banner,
+        SUM(fm.brand_volume_units) AS brand_volume_units,
+        SUM(fm.total_category_volume_units) AS total_category_volume_units
+    FROM fact_market fm
+    JOIN banner_channel_map bcm ON fm.banner = bcm.banner
+    WHERE fm.is_vol_violation = FALSE
+      AND fm.year = 2025
+    GROUP BY fm.week_date, fm.brand, fm.banner
+)
+SELECT
+    sa.brand,
+    SUM(sa.net_revenue_gbp) AS total_net_revenue_gbp,
+    ROUND(SUM(ma.brand_volume_units) * 100.0
+          / NULLIF(SUM(ma.total_category_volume_units), 0), 2) AS volume_market_share_pct
+FROM sales_agg sa
+JOIN market_agg ma
+    ON sa.week_date = ma.week_date
+    AND sa.brand = ma.brand
+    AND sa.banner = ma.banner
+GROUP BY sa.brand
+ORDER BY total_net_revenue_gbp DESC;",1,0,39.9,auto,1,
+Q09,3,baseline,"SELECT
+    fm.banner,
+    ROUND(
+        SUM(fm.numeric_distribution_outlets) * 100.0
+        / NULLIF(SUM(fm.total_outlets_in_banner), 0),
+    2) AS numeric_distribution_pct
+FROM
+    fact_market AS fm
+JOIN
+    (SELECT DISTINCT
+        sub_category,
+        category
+    FROM
+        dim_product
+    WHERE
+        is_active = TRUE) AS dp
+ON
+    fm.sub_category = dp.sub_category
+WHERE
+    dp.category = 'Snacks'
+    AND fm.year = 2024
+    AND fm.is_vol_violation = FALSE
+GROUP BY
+    fm.banner
+ORDER BY
+    numeric_distribution_pct DESC;",1,1,11.5,bar,1,
+Q09,3,treatment,"SELECT
+    fm.banner,
+    ROUND(SUM(fm.numeric_distribution_outlets) * 100.0
+          / NULLIF(SUM(fm.total_outlets_in_banner), 0), 2) AS numeric_distribution_pct
+FROM fact_market fm
+JOIN (SELECT DISTINCT brand, sub_category, category FROM dim_product) AS dp
+  ON fm.brand        = dp.brand
+ AND fm.sub_category = dp.sub_category
+WHERE dp.category = 'Snacks'
+  AND fm.year     = 2024
+GROUP BY fm.banner
+ORDER BY numeric_distribution_pct DESC;",1,0,11.2,bar,1,
+Q10,4,baseline,"SELECT
+  dp.brand,
+  SUM(fs.net_revenue_gbp) AS total_net_revenue_gbp
+FROM fact_sales AS fs
+JOIN dim_product AS dp
+  ON fs.product_id = dp.product_id
+WHERE
+  fs.year = 2024 AND dp.is_active = TRUE AND fs.is_volume_outlier = FALSE
+GROUP BY
+  dp.brand
+ORDER BY
+  total_net_revenue_gbp DESC;",1,0,53,bar,1,
+Q10,4,treatment,"SELECT
+    dp.brand,
+    SUM(fs.net_revenue_gbp) AS total_revenue_gbp
+FROM
+    fact_sales AS fs
+JOIN
+    dim_product AS dp ON fs.product_id = dp.product_id
+WHERE
+    fs.year = 2024
+    AND fs.is_zero_price = FALSE
+    AND fs.is_volume_outlier = FALSE
+GROUP BY
+    dp.brand
+ORDER BY
+    total_revenue_gbp DESC;",1,0,48,bar,1,
+Q11,4,baseline,"WITH BeverageCategoryMarketData AS (
+    SELECT
+        fm.brand,
+        fm.brand_volume_units
+    FROM
+        fact_market AS fm
+    INNER JOIN
+        dim_product AS dp
+    ON
+        fm.brand = dp.brand AND fm.sub_category = dp.sub_category
+    WHERE
+        dp.category = 'Beverages' AND dp.is_active = TRUE
+),
+BrandAggregates AS (
+    SELECT
+        brand,
+        SUM(brand_volume_units) AS total_brand_volume
+    FROM
+        BeverageCategoryMarketData
+    GROUP BY
+        brand
+),
+CategoryTotal AS (
+    SELECT
+        SUM(total_brand_volume) AS overall_category_volume
+    FROM
+        BrandAggregates
+)
+SELECT
+    ba.brand,
+    (ba.total_brand_volume * 100.0 / ct.overall_category_volume) AS market_share_volume_pct
+FROM
+    BrandAggregates AS ba
+CROSS JOIN
+    CategoryTotal AS ct
+ORDER BY
+    market_share_volume_pct DESC
+LIMIT 3;",1,0,10.8,bar,0,new-FP
+Q11,4,treatment,"WITH BeverageCategoryDetails AS (
+    -- Get all distinct brand-subcategory pairs within the Beverages category
+    SELECT DISTINCT
+        dp.brand,
+        dp.sub_category
+    FROM dim_product dp
+    WHERE dp.category = 'Beverages'
+),
+MarketDataForBeverages AS (
+    -- Filter fact_market to only include brands/subcategories within the Beverages category
+    SELECT
+        fm.week_date,
+        fm.brand,
+        fm.sub_category,
+        fm.banner,
+        fm.brand_volume_units,
+        fm.total_category_volume_units -- Total for sub_category x banner x week
+    FROM fact_market fm
+    JOIN BeverageCategoryDetails bcd
+        ON fm.brand = bcd.brand AND fm.sub_category = bcd.sub_category
+    WHERE fm.is_vol_violation = FALSE
+),
+TotalBrandVolumePerBrand AS (
+    -- Calculate total volume for each brand within the Beverages category for ranking
+    SELECT
+        brand,
+        SUM(brand_volume_units) AS total_brand_volume
+    FROM MarketDataForBeverages
+    GROUP BY brand
+),
+TotalCategoryVolumeForBeverages AS (
+    -- Calculate the overall total category volume for 'Beverages'
+    -- We need to sum distinct total_category_volume_units at its native grain (sub_category x banner x week_date)
+    SELECT
+        SUM(distinct_category_volume) AS overall_total_category_volume
+    FROM (
+        SELECT DISTINCT
+            week_date,
+            sub_category,
+            banner,
+            total_category_volume_units AS distinct_category_volume
+        FROM MarketDataForBeverages
+    ) AS distinct_category_volumes
+)
+SELECT
+    tbv.brand,
+    ROUND(tbv.total_brand_volume * 100.0 / (SELECT overall_total_category_volume FROM TotalCategoryVolumeForBeverages), 2) AS market_share_volume_pct
+FROM TotalBrandVolumePerBrand tbv
+ORDER BY tbv.total_brand_volume DESC
+LIMIT 3;",1,0,12.5,bar,1,
+Q12,4,baseline,"WITH dim_product_category AS (
+    -- Pre-aggregate dim_product to brand x sub_category x category to prevent fan-out
+    SELECT DISTINCT
+        brand,
+        sub_category,
+        category
+    FROM dim_product
+)
+SELECT
+    ROUND(SUM(fm.total_category_value_gbp) * 1.0 / NULLIF(SUM(fm.total_category_volume_units), 0), 2) AS average_shelf_price_gbp
+FROM
+    fact_market fm
+JOIN
+    dim_product_category dpc
+    ON fm.brand = dpc.brand AND fm.sub_category = dpc.sub_category
+WHERE
+    dpc.category = 'Dairy'
+    AND fm.banner = 'Hartfield''s' -- Corrected column name from 'banner_name' to 'banner'
+    AND fm.year = 2025
+    AND fm.is_zero_shelf_price = FALSE
+    AND fm.is_vol_violation = FALSE;",1,1,12.4,table,0,new-FP
+Q12,4,treatment,"SELECT
+    AVG(fm.avg_shelf_price_gbp) AS average_dairy_shelf_price_2025
+FROM fact_market fm
+JOIN (
+    SELECT DISTINCT
+        brand,
+        sub_category,
+        category
+    FROM dim_product
+) dp_agg ON fm.brand = dp_agg.brand AND fm.sub_category = dp_agg.sub_category
+WHERE
+    fm.year = 2025
+    AND fm.banner = 'Hartfield''s'
+    AND dp_agg.category = 'Dairy'
+    AND fm.is_zero_shelf_price = FALSE;",1,0,7.3,bar,1,
+Q13,5,baseline,"SELECT
+  dp.category,
+  fs.year,
+  SUM(fs.net_revenue_gbp) AS total_net_revenue_gbp,
+  SUM(fs.volume_units) AS total_volume_units
+FROM fact_sales AS fs
+JOIN dim_product AS dp
+  ON fs.product_id = dp.product_id
+WHERE
+  fs.year IN (2024, 2025) AND fs.is_zero_price = FALSE AND fs.is_volume_outlier = FALSE
+GROUP BY
+  dp.category,
+  fs.year
+ORDER BY
+  dp.category,
+  fs.year;",1,0,86.5,bar,1,
+Q13,5,treatment,"SELECT
+    dp.category,
+    fs.year,
+    SUM(fs.net_revenue_gbp) AS total_net_revenue_gbp,
+    SUM(fs.volume_units) AS total_volume_units
+FROM fact_sales fs
+JOIN dim_product dp
+    ON fs.product_id = dp.product_id
+WHERE fs.is_zero_price = FALSE
+  AND fs.is_volume_outlier = FALSE
+  AND fs.year IN (2024, 2025)
+GROUP BY
+    dp.category,
+    fs.year
+ORDER BY
+    dp.category,
+    fs.year;",1,0,91.2,bar,1,
+Q14,5,baseline,"SELECT
+  dc.channel,
+  SUM(fs.net_revenue_gbp) AS total_net_revenue_gbp
+FROM fact_sales AS fs
+JOIN dim_customer AS dc
+  ON fs.customer_id = dc.customer_id
+WHERE
+  fs.year = 2025 AND fs.month = 1 AND fs.is_zero_price = FALSE AND fs.is_volume_outlier = FALSE
+GROUP BY
+  dc.channel
+ORDER BY
+  total_net_revenue_gbp DESC;",1,0,43.8,bar,1,
+Q14,5,treatment,"SELECT
+    dc.channel,
+    SUM(fs.net_revenue_gbp) AS total_net_revenue_gbp
+FROM
+    fact_sales AS fs
+JOIN
+    dim_customer AS dc ON fs.customer_id = dc.customer_id
+WHERE
+    fs.year = 2025
+    AND fs.month = 1
+    AND fs.is_zero_price = FALSE
+    AND fs.is_volume_outlier = FALSE
+GROUP BY
+    dc.channel
+ORDER BY
+    total_net_revenue_gbp DESC;",1,0,46,auto,1,
+Q15,5,baseline,"SELECT
+    fs.week_date,
+    SUM(fs.volume_units) AS total_volume_units
+FROM
+    fact_sales AS fs
+JOIN
+    dim_product AS dp
+    ON fs.product_id = dp.product_id
+WHERE
+    dp.is_active = TRUE
+    AND dp.category = 'Confectionery'
+    AND fs.year = 2025
+    AND fs.quarter IN (3, 4)
+    AND fs.is_volume_outlier = FALSE
+    AND fs.is_zero_price = FALSE
+GROUP BY
+    fs.week_date
+ORDER BY
+    fs.week_date;",1,0,45.4,line,0, FP-02
+Q15,5,treatment,"SELECT
+    fs.week_date,
+    SUM(fs.volume_units) AS total_volume_units
+FROM
+    fact_sales AS fs
+JOIN
+    dim_product AS dp
+ON
+    fs.product_id = dp.product_id
+WHERE
+    dp.category = 'Confectionery'
+    AND fs.year = 2025
+    AND fs.quarter IN (3, 4)
+    AND fs.is_volume_outlier = FALSE
+GROUP BY
+    fs.week_date
+ORDER BY
+    fs.week_date;",1,0,34.8,line,1,
+Q16,2,baseline,"SELECT
+  dp.brand,
+  SUM(fs.net_revenue_gbp) AS total_net_revenue_gbp
+FROM fact_sales AS fs
+JOIN dim_product AS dp
+  ON fs.product_id = dp.product_id
+WHERE
+  fs.year = 2025
+  AND fs.is_volume_outlier = FALSE
+  AND fs.is_zero_price = FALSE
+  AND dp.is_active = TRUE
+GROUP BY
+  dp.brand
+ORDER BY
+  total_net_revenue_gbp DESC;",1,0,48,bar,1,
+Q16,2,treatment,"SELECT
+    dp.brand,
+    SUM(fs.net_revenue_gbp) AS total_net_revenue_gbp
+FROM fact_sales AS fs
+JOIN dim_product AS dp
+    ON fs.product_id = dp.product_id
+WHERE
+    fs.year              = 2025
+    AND fs.is_zero_price     = FALSE
+    AND fs.is_volume_outlier = FALSE
+GROUP BY
+    dp.brand
+ORDER BY
+    total_net_revenue_gbp DESC;",1,0,39.4,bar,1,
+Q17,3,baseline,"SELECT
+    SUM(CASE WHEN fm.brand = 'BerryBliss' THEN fm.brand_volume_units ELSE 0 END) * 100.0 / SUM(fm.total_category_volume_units) AS berrybliss_volume_market_share_pct
+FROM
+    fact_market AS fm
+WHERE
+    fm.sub_category = 'Sugar Sweets'
+    AND fm.year = 2025
+    AND fm.quarter IN (1, 2);",1,0,7.5,table,0,new-FP + FP-02
+Q17,3,treatment,"SELECT
+    brand,
+    sub_category,
+    ROUND(SUM(brand_volume_units) * 100.0
+          / NULLIF(SUM(total_category_volume_units), 0), 2)
+                                             AS volume_market_share_pct
+FROM fact_market
+WHERE brand            = 'BerryBliss'
+  AND sub_category     = 'Sugar Sweets'
+  AND year             = 2025
+  AND quarter          IN (1, 2)
+  AND is_vol_violation = FALSE
+GROUP BY brand, sub_category;",1,0,4,bar,1,
+Q18,3,baseline,"WITH QuarterlyRevenueSummary AS (
+    SELECT
+        fs.year,
+        fs.quarter,
+        SUM(fs.net_revenue_gbp) AS total_net_revenue_gbp,
+        COUNT(DISTINCT fs.week_number) AS distinct_weeks
+    FROM
+        fact_sales AS fs
+    JOIN
+        dim_product AS dp ON fs.product_id = dp.product_id
+    WHERE
+        dp.is_active = TRUE
+        AND dp.brand = 'CocoaEthos'
+        AND fs.year = 2025
+        AND fs.quarter IN (2, 4)
+        AND fs.is_zero_price = FALSE
+        AND fs.is_volume_outlier = FALSE
+    GROUP BY
+        fs.year,
+        fs.quarter
+)
+SELECT
+    qrs.year,
+    qrs.quarter,
+    qrs.total_net_revenue_gbp / qrs.distinct_weeks AS average_weekly_net_revenue_gbp
+FROM
+    QuarterlyRevenueSummary AS qrs
+ORDER BY
+    qrs.quarter;",1,0,52.7,bar,1,
+Q18,3,treatment,"SELECT
+    fs.quarter,
+    SUM(fs.net_revenue_gbp) / COUNT(DISTINCT fs.week_date) AS avg_weekly_net_revenue_gbp
+FROM fact_sales AS fs
+JOIN dim_product AS dp
+    ON fs.product_id = dp.product_id
+WHERE
+    dp.brand = 'CocoaEthos'
+    AND fs.year = 2025
+    AND fs.quarter IN (2, 4)
+    AND fs.is_zero_price = FALSE
+    AND fs.is_volume_outlier = FALSE
+GROUP BY
+    fs.quarter
+ORDER BY
+    fs.quarter;",1,0,50.4,auto,1,
+Q19,4,baseline,"WITH BrandAnnualRevenue AS (
+    SELECT
+        dp.brand,
+        fs.year,
+        SUM(fs.net_revenue_gbp) AS total_net_revenue
+    FROM fact_sales AS fs
+    JOIN dim_product AS dp
+        ON fs.product_id = dp.product_id
+    WHERE
+        dp.category = 'Confectionery'
+        AND fs.year IN (2024, 2025)
+        AND fs.is_zero_price = FALSE -- Exclude zero-price transactions for revenue calculations (C2)
+        AND fs.is_volume_outlier = FALSE -- Exclude volume outliers for revenue calculations (C3)
+    GROUP BY
+        dp.brand,
+        fs.year
+)
+SELECT
+    rar_2024.brand,
+    rar_2024.total_net_revenue AS net_revenue_2024,
+    rar_2025.total_net_revenue AS net_revenue_2025,
+    (rar_2025.total_net_revenue - rar_2024.total_net_revenue) / rar_2024.total_net_revenue AS decline_rate
+FROM BrandAnnualRevenue AS rar_2024
+JOIN BrandAnnualRevenue AS rar_2025
+    ON rar_2024.brand = rar_2025.brand
+WHERE
+    rar_2024.year = 2024
+    AND rar_2025.year = 2025
+    AND (rar_2025.total_net_revenue - rar_2024.total_net_revenue) / rar_2024.total_net_revenue < -0.02
+ORDER BY
+    decline_rate ASC;",1,0,67.1,bar,1,
+Q19,4,treatment,"WITH brand_revenue_by_year AS (
+    SELECT
+        dp.brand,
+        fs.year,
+        SUM(fs.net_revenue_gbp) AS total_net_revenue
+    FROM fact_sales AS fs
+    JOIN dim_product AS dp
+        ON fs.product_id = dp.product_id
+    WHERE
+        dp.category = 'Confectionery'
+        AND fs.is_zero_price = FALSE
+        AND fs.is_volume_outlier = FALSE
+        AND fs.year IN (2024, 2025)
+    GROUP BY
+        dp.brand,
+        fs.year
+),
+yearly_revenue_pivot AS (
+    SELECT
+        brand,
+        SUM(CASE WHEN year = 2024 THEN total_net_revenue ELSE 0 END) AS revenue_2024,
+        SUM(CASE WHEN year = 2025 THEN total_net_revenue ELSE 0 END) AS revenue_2025
+    FROM brand_revenue_by_year
+    GROUP BY brand
+)
+SELECT
+    brand,
+    -- Calculate decline rate as percentage change
+    ROUND((revenue_2025 - revenue_2024) * 100.0 / NULLIF(revenue_2024, 0), 2) AS decline_rate_pct
+FROM yearly_revenue_pivot
+WHERE
+    -- Filter for brands with a decline greater than 2% (i.e., change < -2)
+    (revenue_2025 - revenue_2024) * 100.0 / NULLIF(revenue_2024, 0) < -2
+ORDER BY
+    decline_rate_pct ASC;",1,0,52.4,bar,1,
+Q20,5,baseline,"SELECT
+  dp.brand,
+  SUM(CASE WHEN fs.year = 2024 THEN fs.net_revenue_gbp ELSE 0 END) AS net_revenue_q3_2024_gbp,
+  SUM(CASE WHEN fs.year = 2025 THEN fs.net_revenue_gbp ELSE 0 END) AS net_revenue_q3_2025_gbp
+FROM fact_sales AS fs
+JOIN dim_product AS dp
+  ON fs.product_id = dp.product_id
+WHERE
+  dp.brand IN ('CocoaEthos', 'BerryBliss', 'Velvet Dairy')
+  AND fs.quarter = 3
+  AND fs.year IN (2024, 2025)
+  AND fs.is_zero_price = FALSE
+  AND fs.is_volume_outlier = FALSE
+GROUP BY
+  dp.brand
+ORDER BY
+  net_revenue_q3_2025_gbp DESC;",1,0,42.7,auto,1,
+Q20,5,treatment,"SELECT
+    dp.brand,
+    fs.year,
+    SUM(fs.net_revenue_gbp) AS total_net_revenue_gbp
+FROM fact_sales AS fs
+JOIN dim_product AS dp
+    ON fs.product_id = dp.product_id
+WHERE
+    dp.brand IN ('CocoaEthos', 'BerryBliss', 'Velvet Dairy')
+    AND fs.quarter = 3
+    AND fs.year IN (2024, 2025)
+    AND fs.is_zero_price = FALSE
+    AND fs.is_volume_outlier = FALSE
+GROUP BY
+    dp.brand,
+    fs.year
+ORDER BY
+    dp.brand,
+    fs.year;",1,0,20.5,bar,1,

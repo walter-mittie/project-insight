@@ -3,7 +3,7 @@ tests/test_executor.py
 ----------------------
 F-09 Acceptance Tests — SQL Execution Layer
 
-AM1: Agentic Conversational BI — Manu Mohandas / TCS
+Project Insight: Agentic Conversational BI 
 
 Tests cover:
     - Known-good SQL → status = "success", DataFrame returned (AC1, AC3)

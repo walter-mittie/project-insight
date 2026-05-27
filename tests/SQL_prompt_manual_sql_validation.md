@@ -1,4 +1,4 @@
-
+**Version 1:** Sprint 2 (15 Qs) | **Version 2:** Sprint 5 (20 Qs)
 ### Q01 : How many distinct SKUs were sold in Q1 2024?
 
 ```sql
@@ -366,4 +366,122 @@ where dp.category = 'Confectionery'
 group by week_starting
 order by week_starting
 ;
+```
+
+### Q16 : Total net revenue by brand for 2025, excluding volume outlier weeks
+
+```sql
+select
+  dp.brand,
+  '£ ' || printf('%,.2f', sum(net_revenue_gbp)) as '2025_net_revenue'
+from
+  fact_sales as fs
+  join dim_product as dp using (product_id)
+where
+  fs.is_volume_outlier = false
+  and is_zero_price = false
+  and fs.year = 2025
+group by
+  dp.brand
+order by
+  sum(net_revenue_gbp) desc
+```
+
+### Q17 : BerryBliss's volume market share in the Sugar Sweets sub-category, all banners combined, in H1 2025
+
+```sql
+select
+  round(100 * sum(brand_volume_units) / sum(total_category_volume_units), 2) as volume_market_share_pct
+from
+  fact_market
+where
+  brand = 'BerryBliss'
+  and sub_category = 'Sugar Sweets'
+  and year = 2025
+  and quarter in (1, 2)
+  and is_vol_violation = false
+```
+
+### Q18 : CocoaEthos average weekly net revenue: Q2 2025 vs Q4 2025
+
+```sql
+SELECT
+  '2025Q' || fs.quarter as quarter,
+  ROUND(SUM(fs.net_revenue_gbp) / NULLIF(COUNT(DISTINCT fs.week_date), 0), 2) AS avg_weekly_net_revenue_gbp
+FROM
+  fact_sales AS fs
+  JOIN dim_product AS dp ON fs.product_id = dp.product_id
+WHERE
+  dp.brand = 'CocoaEthos'
+  AND fs.year = 2025
+  AND fs.quarter IN (2, 4)
+  AND fs.is_zero_price = FALSE
+  AND fs.is_volume_outlier = FALSE
+GROUP BY
+  fs.quarter
+```
+
+### Q19 : Brands in Confectionery category that declined by more than 2% in net revenue from 2024 to 2025
+
+```sql
+WITH brand_rev AS (
+    SELECT
+        dp.brand,
+        SUM(CASE WHEN fs.year = 2024 THEN fs.net_revenue_gbp ELSE 0 END) AS rev_2024,
+        SUM(CASE WHEN fs.year = 2025 THEN fs.net_revenue_gbp ELSE 0 END) AS rev_2025
+    FROM fact_sales AS fs
+    JOIN dim_product AS dp
+        ON fs.product_id = dp.product_id
+    WHERE dp.category          = 'Confectionery'
+      AND fs.year              IN (2024, 2025)
+      AND fs.is_zero_price     = FALSE
+      AND fs.is_volume_outlier = FALSE
+    GROUP BY dp.brand
+)
+SELECT
+    brand,
+    ROUND(rev_2024, 2)                                            AS net_revenue_2024_gbp,
+    ROUND(rev_2025, 2)                                            AS net_revenue_2025_gbp,
+    ROUND((rev_2025 - rev_2024) / NULLIF(rev_2024, 0) * 100, 2)  AS growth_rate_pct
+FROM brand_rev
+WHERE rev_2024 > 0
+  AND (rev_2025 - rev_2024) / NULLIF(rev_2024, 0) * 100 < -2
+ORDER BY growth_rate_pct ASC;
+```
+
+### Q20 : Multi-turn ·  T1 - top 3 brands by net revenue Q3 2025
+
+```sql
+SELECT
+    dp.brand,
+    SUM(fs.net_revenue_gbp) AS total_net_revenue_gbp
+FROM fact_sales AS fs
+JOIN dim_product AS dp
+    ON fs.product_id = dp.product_id
+WHERE fs.year              = 2025
+  AND fs.quarter           = 3
+  AND fs.is_zero_price     = FALSE
+  AND fs.is_volume_outlier = FALSE
+GROUP BY dp.brand
+ORDER BY total_net_revenue_gbp DESC
+LIMIT 3;
+```
+### Q20 : Multi-turn ·  T2 - compare those 3 brands Q3 2024 vs Q3 2025
+
+```sql
+SELECT
+    dp.brand,
+    fs.year,
+    SUM(fs.net_revenue_gbp) AS total_net_revenue_gbp
+FROM fact_sales AS fs
+JOIN dim_product AS dp
+    ON fs.product_id = dp.product_id
+WHERE dp.brand             IN ('CocoaEthos', 'BerryBliss', 'Velvet Dairy')
+  AND fs.quarter           = 3
+  AND fs.year              IN (2024, 2025)
+  AND fs.is_zero_price     = FALSE
+  AND fs.is_volume_outlier = FALSE
+GROUP BY dp.brand, fs.year
+ORDER BY dp.brand, fs.year;
+
 ```

@@ -1,8 +1,9 @@
 # 15-Query Manual Test Suite — F-08 AC3
 
-**Run timestamp:** 2026-05-09 16:53:29  
+**Run timestamp:** 2026-01-16 16:53:29  
 **Total queries:** 15  
 **Model:** gemini-2.5-flash  
+**Sprint:** 2
 
 ---
 
